@@ -1,166 +1,184 @@
-# computer-control — 桌面控制插件（for dsh）
+[简体中文](README.zh.md)
 
-让 agent 直接操作电脑桌面：截屏观察、鼠标/键盘注入、通过可访问性树实现的语义操作（语义优先、像素坐标兜底），并内置急停、允许/拒绝规则、确认流与空闲待机等安全护栏。
+# computer-control — Desktop Control Plugin (for dsh)
 
-插件自包含、可被 dsh 直接加载：通过 `manifest.json` 声明工具与事件，以**行分隔 JSON-RPC 2.0**（stdio）为传输协议，`python -m computer_control serve` 即入口。
+Lets an agent operate the computer desktop directly: screenshot observation, mouse/keyboard injection, semantic actions via the accessibility tree (semantics first, pixel-coordinate fallback), with built-in safety guards — emergency stop, allow/deny rules, confirmation flow and idle standby.
+
+The plugin is self-contained and loadable by dsh directly: it declares tools and events via `manifest.json`, speaks **line-delimited JSON-RPC 2.0** (stdio) as its transport protocol, and `python -m computer_control serve` is the entry point.
 
 ---
 
-## 功能总览
+## Feature Overview
 
-| 能力 | 说明 |
+| Capability | Description |
 | --- | --- |
-| 截图 `screen.capture` | 全屏或区域截图，支持 PNG/JPEG、缩放、灰度——token 成本可控 |
-| 鼠标 `pointer.*` | 移动、左/中/右键单击（含双击/三击）、拖拽、滚轮（横/纵） |
-| 键盘 `keyboard.*` | 单键、组合键（扫描码注入，与键盘布局无关）、任意 Unicode 文本输入 |
-| 等待 `wait.pause` | 动作间暂停，让界面稳定后再截图 |
-| 语义操作 `a11y.*` | 可访问性树分级摘要（skeleton/standard/full）、语义激活/输入——先走 UIA 模式，失败自动降级为包围盒像素点击 |
-| 批量 `batch.execute` | 一次调用执行多个动作，减少模型往返；可整批确认、可遇错继续 |
-| 能力广播 | `tools.list`/`system.status` 报告各后端是否可用，语义工具仅在 UIA 可用时暴露 |
+| Screenshot `screen.capture` | Full-screen or region capture, PNG/JPEG, scaling, grayscale — token costs under control |
+| Mouse `pointer.*` | Move, left/middle/right click (double/triple), drag, scroll (horizontal/vertical) |
+| Keyboard `keyboard.*` | Single keys, chords (scancode injection, layout-independent), arbitrary Unicode text input |
+| Wait `wait.pause` | Pause between actions so the UI can settle before the next screenshot |
+| Semantic actions `a11y.*` | Hierarchical accessibility-tree summaries (skeleton/standard/full), semantic activate/input — UIA mode first, automatic fallback to bounding-box pixel clicks |
+| Batch `batch.execute` | Run several actions in one call to reduce model round trips; confirmable as a whole, can continue on error |
+| Capability broadcast | `tools.list` / `system.status` report per-backend availability; semantic tools are only exposed when UIA is available |
 
-安全护栏（详见「安全」一节）：
+Safety guards (see the "Safety" section):
 
-- **急停**：全局热键（默认 `Ctrl+Alt+F12`，可配）、协议指令、panic 文件三重触发；屏幕角落显示 STOP 横幅
-- **允许/拒绝规则**：按工具名与参数匹配，拒绝永远优先；可切换白名单模式
-- **确认流**：高风险动作（含 `win` 键或 `ctrl+alt` 的组合键等）等待人工批准，超时自动拒绝
-- **空闲待机**：无操作超过阈值自动进入待机，拒绝一切动作直到恢复
-- **演练模式**：`platform: "dry-run"` 只记录不执行，用于安全排练
+- **Emergency stop**: triple trigger — global hotkey (default `Ctrl+Alt+F12`, configurable), protocol command, panic file; a STOP banner shows in the screen corner
+- **Allow/deny rules**: matched by tool name and arguments, deny always wins; whitelist mode switchable
+- **Confirmation flow**: high-risk actions (including chords with `win` or `ctrl+alt`) wait for human approval, auto-denied on timeout
+- **Idle standby**: no activity past a threshold puts the session into standby, rejecting all actions until resumed
+- **Dry-run mode**: `platform: "dry-run"` logs actions without executing them, for safe rehearsals
 
-## 目录结构
+## Directory Structure
 
 ```
 computer-control/
-├── manifest.json            # dsh 插件清单（工具/事件/入口/传输）
-├── pyproject.toml           # 打包元数据与依赖声明
-├── requirements.txt         # 核心依赖（仅 Pillow）
-├── requirements-optional.txt# 可选能力依赖（UIA/mss/热键）
+├── manifest.json            # dsh plugin manifest (tools/events/entry/transport)
+├── pyproject.toml           # packaging metadata and dependency declarations
+├── requirements.txt         # core dependencies (Pillow only)
+├── requirements-optional.txt# optional capability deps (UIA/mss/hotkey)
 ├── README.md
 ├── docs/                    # integration / protocol / actions / configuration
-├── examples/                # 配置示例、会话示例、演示脚本
-├── computer_control/        # 插件实现（Python 包）
-│   ├── cli.py __main__.py   # 入口：serve / check / list
-│   ├── session.py           # 会话生命周期与动作串行执行
-│   ├── engine.py            # 动作执行引擎（坐标映射、事件）
-│   ├── policy.py            # 安全门：规则/确认/急停/看门狗
-│   ├── actions.py           # 动作注册表与参数校验
-│   ├── geometry.py          # 模型画布 <-> 物理像素 映射
-│   ├── protocol.py server.py# JSON-RPC 路由与 stdio/HTTP 传输
-│   ├── client.py            # 供 harness/脚本使用的客户端
-│   ├── overlay.py           # 急停可视横幅（可选，tkinter）
-│   ├── drivers/             # 执行层抽象 + windows 实现 + 演练驱动
-│   └── a11y/                # 可访问性树摘要 + Windows UIA 桥
-└── tests/                   # 纯逻辑与协议测试（不触碰真实硬件）
+├── examples/                # config examples, session examples, demo scripts
+├── computer_control/        # plugin implementation (Python package)
+│   ├── cli.py __main__.py   # entry: serve / check / list
+│   ├── session.py           # session lifecycle and serial action execution
+│   ├── engine.py            # action execution engine (coordinate mapping, events)
+│   ├── policy.py            # safety gate: rules/confirmation/panic/watchdog
+│   ├── actions.py           # action registry and argument validation
+│   ├── geometry.py          # model canvas <-> physical pixel mapping
+│   ├── protocol.py server.py# JSON-RPC routing and stdio/HTTP transports
+│   ├── client.py            # client for harness/scripts
+│   ├── overlay.py           # emergency-stop visual banner (optional, tkinter)
+│   ├── drivers/             # execution-layer abstraction + windows impl + dry-run driver
+│   └── a11y/                # accessibility-tree summaries + Windows UIA bridge
+└── tests/                   # pure-logic and protocol tests (no real hardware)
 ```
 
-## 安装
+## Installing in DSH
 
-要求：**Python 3.9+**，Windows 10/11（完整功能）；其他平台见「平台支持」。
+```bash
+dsh plugin --profile demo add github:JohnXu22786/computer-control
+```
+
+Remove with:
+
+```bash
+dsh plugin --profile demo remove computer-control
+```
+
+## Installation
+
+Requirements: **Python 3.9+**, Windows 10/11 (full functionality); other platforms see "Platform Support".
 
 ```powershell
-# 核心（截图 + 输入注入）
+# Core (screenshot + input injection)
 pip install -r requirements.txt
 
-# 可选能力（推荐）：
-#   comtypes  -> 可访问性树（UIA）语义操作
-#   mss       -> 更快的多显示器截图后端
+# Optional capabilities (recommended):
+#   comtypes  -> accessibility-tree (UIA) semantic actions
+#   mss       -> faster multi-monitor screenshot backend
 pip install -r requirements-optional.txt
 ```
 
-自检环境：
+Environment self-check:
 
 ```powershell
 python -m computer_control check
 ```
 
-输出平台、DPI 模式、虚拟桌面几何、截图后端、UIA 可用性、热键等诊断。
+Prints diagnostics for platform, DPI mode, virtual-desktop geometry, screenshot backend, UIA availability, hotkeys, etc.
 
-## 快速开始
+## Quick Start
 
 ```powershell
-# 查看声明的工具与事件
+# List declared tools and events
 python -m computer_control list
 
-# 启动插件服务（stdio，供 dsh 加载）
+# Start the plugin service (stdio, for dsh to load)
 python -m computer_control serve
 ```
 
-用 `examples/demo.py` 跑一个演练会话（默认 `dry-run`，不触碰真实桌面）：
+Run a rehearsal session with `examples/demo.py` (defaults to `dry-run`, touches nothing on the real desktop):
 
 ```powershell
 python examples/demo.py
 ```
 
-## dsh 接入（摘要）
+## dsh Integration (Summary)
 
-完整接入说明见 [`docs/integration.md`](docs/integration.md)。
+Full integration notes: [`docs/integration.md`](docs/integration.md).
 
-1. **加载**：dsh 读取 `manifest.json`，按 `entry.command` 启动进程，建立 stdio 管道（UTF-8，一行一个 JSON 对象）。
-2. **生命周期**：先发 `session.start`（可带配置）→ 收到 `session.started` 事件后即可调用工具；结束发 `session.stop`。
-3. **调用动作**：`tools.call`（单个）或 `tools.call_batch`（批量）。响应统一为 `{ok, result, error, meta}` 信封。
-4. **事件**：服务端以 `event` 通知推送 `action.started/finished`、`safety.confirmation_requested` 等。
-5. **确认流**：高风险动作返回 `awaiting_confirmation` 并发出确认事件；harness 应弹出人工确认，再以 `session.confirm` 批复；超时自动拒绝。
+1. **Loading**: dsh reads `manifest.json`, starts the process via `entry.command`, and establishes a stdio pipe (UTF-8, one JSON object per line).
+2. **Lifecycle**: send `session.start` (optionally with config) → wait for the `session.started` event, then call tools; send `session.stop` at the end.
+3. **Calling actions**: `tools.call` (single) or `tools.call_batch` (batch). Responses use a unified `{ok, result, error, meta}` envelope.
+4. **Events**: the server pushes `action.started/finished`, `safety.confirmation_requested`, etc. as `event` notifications.
+5. **Confirmation flow**: high-risk actions return `awaiting_confirmation` and emit a confirmation event; the harness should surface a human approval prompt, then reply via `session.confirm`; timed out confirmations are auto-denied.
 
-模型调用动作的推荐循环：`screen.capture` 观察 → 用画布坐标执行 `pointer.*`/`a11y.*` → `wait.pause`（如需）→ 新截图验证结果。
+The recommended model loop: `screen.capture` to observe → execute `pointer.*` / `a11y.*` on canvas coordinates → `wait.pause` (if needed) → a fresh screenshot to verify the result.
 
-## 动作指南（摘要）
+## Action Reference (Summary)
 
-全部动作、参数与示例见 [`docs/actions.md`](docs/actions.md)。
+All actions, parameters and examples: [`docs/actions.md`](docs/actions.md).
 
-| 动作 | 作用 | 风险 |
+| Action | Purpose | Risk |
 | --- | --- | --- |
-| `screen.capture` | 截图（区域/格式/缩放/灰度） | 无 |
-| `pointer.move` | 移动指针 | 中 |
-| `pointer.click` | 单击/双击/三击，可选位置 | 中 |
-| `pointer.drag` | 按住拖拽 | 中 |
-| `pointer.scroll` | 滚轮（横/纵） | 中 |
-| `keyboard.press` | 单键 | 中 |
-| `keyboard.combo` | 组合键（含 win 或 ctrl+alt 时升级为高） | 中/高 |
-| `keyboard.type` | 文本输入（Unicode） | 中 |
-| `wait.pause` | 暂停 | 无 |
-| `a11y.snapshot` | 可访问性树分级摘要 | 无 |
-| `a11y.activate` | 语义激活（模式优先，像素兜底） | 中 |
-| `a11y.input` | 语义文本输入（Value 模式优先） | 中 |
-| `batch.execute` | 批量执行 | 取各项最大风险 |
+| `screen.capture` | Screenshot (region/format/scale/grayscale) | none |
+| `pointer.move` | Move pointer | moderate |
+| `pointer.click` | Single/double/triple click, optional position | moderate |
+| `pointer.drag` | Press and drag | moderate |
+| `pointer.scroll` | Wheel (horizontal/vertical) | moderate |
+| `keyboard.press` | Single key | moderate |
+| `keyboard.combo` | Chord (upgrades to high when it includes win or ctrl+alt) | moderate/high |
+| `keyboard.type` | Text input (Unicode) | moderate |
+| `wait.pause` | Pause | none |
+| `a11y.snapshot` | Hierarchical accessibility-tree summary | none |
+| `a11y.activate` | Semantic activation (pattern first, pixel fallback) | moderate |
+| `a11y.input` | Semantic text input (value pattern first) | moderate |
+| `batch.execute` | Batch execution | max of items |
 
-### 坐标契约
+### Coordinate Contract
 
-模型看到的是**画布**而非原始屏幕：截图被缩放到以 `display_width_px`（默认 1920）为宽的等比例画布，模型返回的坐标就在这个画布上；插件按 `scale = 物理宽 / 画布宽` 均匀映射回物理像素后执行。`screen.capture` 结果中带有 `canvas` 字段与 `display_width_px/display_height_px`，模型以此为准。多显示器（含主屏左侧/上方的负坐标区域）与每显示器 DPI 均已在执行层处理。
+The model sees a **canvas**, not the raw screen: screenshots are scaled to an aspect-preserving canvas whose width is `display_width_px` (default 1920), and coordinates returned by the model live on that canvas; the plugin maps them back to physical pixels uniformly via `scale = physical width / canvas width`. The `screen.capture` result carries a `canvas` field along with `display_width_px/display_height_px` as the source of truth. Multi-monitor setups (including negative-coordinate regions left/above the primary display) and per-monitor DPI are handled in the execution layer.
 
-## 安全
+## Safety
 
-详见 [`docs/configuration.md`](docs/configuration.md#safety) 与 README 下方要点：
+See [`docs/configuration.md`](docs/configuration.md#safety) and the points below:
 
-- **急停（三重）**：默认全局热键 `Ctrl+Alt+F12`（配置 `safety.emergency_hotkey`，可置空禁用）；协议方法 `control.panic`；panic 文件（`safety.panic_file`，存在即停）。急停后所有动作返回 `safety_stopped`；`session.resume` 或再次按热键恢复。急停生效时桌面角落显示红色 STOP 横幅（`safety.visual_indicator`）。
-- **允许/拒绝规则**（`safety.rules`）：`{match: {tool: "keyboard.*", argument: {name, matcher, value}}, effect: "deny"}`；拒绝规则永远优先于允许。`safety.default_rule: "deny"` 可切换为白名单模式（未显式允许的动作一律拒绝）。规则可运行时通过 `session.configure` 调整。
-- **确认流**：`safety.confirm_threshold`（默认 `high`）决定哪些风险等级需要人工批准；`safety.confirm_timeout_s`（默认 30s）超时自动拒绝。批准后动作照常执行并发出 `action.finished`。
-- **空闲待机**：`safety.idle_timeout_s` 大于 0 时启用，无操作超时进入待机（`session.idle` 事件），`session.resume` 恢复；`idle_action: "none"` 则只发事件不停摆。
-- **演练模式**：`platform: "dry-run"` 下一切动作只记录不执行，便于接入联调与安全排练。
+- **Emergency stop (triple)**: default global hotkey `Ctrl+Alt+F12` (configurable via `safety.emergency_hotkey`, set empty to disable); protocol method `control.panic`; panic file (`safety.panic_file`, presence stops everything). After a panic all actions return `safety_stopped`; `session.resume` or pressing the hotkey again restores operation. A red STOP banner shows in the screen corner while engaged (`safety.visual_indicator`).
+- **Allow/deny rules** (`safety.rules`): `{match: {tool: "keyboard.*", argument: {name, matcher, value}}, effect: "deny"}`; deny rules always win over allow rules. `safety.default_rule: "deny"` switches to whitelist mode (anything not explicitly allowed is denied). Rules can be adjusted at runtime via `session.configure`.
+- **Confirmation flow**: `safety.confirm_threshold` (default `high`) decides which risk levels need human approval; `safety.confirm_timeout_s` (default 30s) auto-denies on timeout. Approved actions execute normally and emit `action.finished`.
+- **Idle standby**: enabled when `safety.idle_timeout_s` > 0; after no activity for the timeout the session enters standby (emits `session.idle`), `session.resume` restores it; `idle_action: "none"` only emits the event without pausing.
+- **Dry-run mode**: with `platform: "dry-run"` every action is logged but never executed — handy for integration debugging and safety rehearsals.
 
-## 平台支持
+## Platform Support
 
-| 平台 | 驱动 | 说明 |
+| Platform | Driver | Notes |
 | --- | --- | --- |
-| Windows | `drivers/windows.py` | 完整实现：SendInput 扫描码注入、每显示器 DPI 感知、虚拟桌面坐标、mss/Pillow 截图、UIA 语义层 |
-| macOS / Linux | 接口已抽象 | `drivers/base.py` 定义了完整驱动契约（capture/pointer/keys/a11y/hotkey）；按契约实现对应平台驱动即可接入（`drivers/windows.py` 提供了完整示例）。未实现前 `platform: "auto"` 会给出明确报错 |
-| 任何平台 | `drivers/dummy.py` | 演练驱动：记录一切动作，不触碰硬件 |
+| Windows | `drivers/windows.py` | Full implementation: SendInput scancode injection, per-monitor DPI awareness, virtual-desktop coordinates, mss/Pillow screenshots, UIA semantic layer |
+| macOS / Linux | interface abstracted | `drivers/base.py` defines the complete driver contract (capture/pointer/keys/a11y/hotkey); implement it per platform to plug in (`drivers/windows.py` is a complete example). Until implemented, `platform: "auto"` fails with a clear error |
+| Any platform | `drivers/dummy.py` | Dry-run driver: records every action, touches no hardware |
 
-**依赖与降级**：
+**Dependencies and degradation**:
 
-- `Pillow`（必需）：截图与编码。缺失时插件拒绝启动。
-- `mss`（可选）：Windows 上更快、多显示器更可靠；缺失自动回退 Pillow ImageGrab。
-- `comtypes`（可选）：UIA 语义操作。缺失时 `a11y.*` 工具在 `tools.list` 中标记为不可用，调用返回 `backend_unavailable`——像素坐标路径（截图+点击）不受影响。
-- `keyboard`（可选，预留）：macOS/Linux 驱动的全局热键将依赖它；当前仅 Windows 与演练驱动随插件发布，Windows 内置 `GetAsyncKeyState` 轮询，无需该包。
+- `Pillow` (required): screenshots and encoding. The plugin refuses to start without it.
+- `mss` (optional): faster and more reliable on multi-monitor Windows; falls back to Pillow ImageGrab when missing.
+- `comtypes` (optional): UIA semantic actions. When missing, `a11y.*` tools are marked unavailable in `tools.list` and calls return `backend_unavailable` — the pixel-coordinate path (screenshot + click) is unaffected.
+- `keyboard` (optional, reserved): global hotkeys on macOS/Linux drivers will depend on it; only the Windows and dry-run drivers ship today, and Windows uses built-in `GetAsyncKeyState` polling, so the package is not needed.
 
-**已知限制**：
+**Known limitations**:
 
-- 安全注意序列（如 `Ctrl+Alt+Del`）无法通过输入注入触发——系统级保护，插件同样无法绕过。
-- UIA 依赖目标程序暴露可访问性接口；不暴露的程序（部分游戏、自绘 UI）只能走像素路径。
-- 键盘扫描码注入对 DirectInput/raw input 程序更友好，但仍可能被部分反作弊类程序拒绝（属正常防护行为）。
+- Secure attention sequences (e.g. `Ctrl+Alt+Del`) cannot be triggered via input injection — an OS-level protection that the plugin cannot bypass either.
+- UIA depends on the target program exposing an accessibility interface; programs that do not (some games, self-drawn UIs) can only use the pixel path.
+- Keyboard scancode injection works better with DirectInput/raw-input programs, but some anti-cheat programs may still reject it (normal protective behavior).
 
-## 测试
+## Testing
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
 
-测试全部使用纯逻辑与演练驱动，不注入真实输入、不触碰真实硬件；Windows 真实链路由 `python -m computer_control check` 与 `examples/demo.py --live` 人工验证。
+Tests use only pure logic and the dry-run driver — no real input is injected, no real hardware is touched; the real Windows chain is verified manually via `python -m computer_control check` and `examples/demo.py --live`.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 JohnXu22786.
