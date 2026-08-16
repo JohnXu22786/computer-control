@@ -1,0 +1,2 @@
+# Core dependencies (required on every platform)
+Pillow>=9.2

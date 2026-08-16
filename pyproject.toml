@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "computer-control-plugin"
+version = "0.1.0"
+description = "Desktop control plugin for dsh: capture, pointer, keyboard, accessibility-tree semantic actions, and safety guards."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "Pillow>=9.2",
+]
+
+[project.optional-dependencies]
+uia = ["comtypes>=1.2"]
+mss = ["mss>=9"]
+full = ["comtypes>=1.2", "mss>=9", "keyboard>=0.13"]
+dev = ["pytest"]
+
+[project.scripts]
+computer-control = "computer_control.cli:main"
+
+[tool.setuptools]
+packages = ["computer_control", "computer_control.drivers", "computer_control.a11y"]

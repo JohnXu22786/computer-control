@@ -1,0 +1,42 @@
+{
+  "platform": {
+    "name": "auto"
+  },
+  "capture": {
+    "default_width": 1920,
+    "default_format": "png",
+    "default_quality": 85,
+    "grayscale": false,
+    "max_area": 5000000,
+    "backend": "auto"
+  },
+  "safety": {
+    "emergency_hotkey": "ctrl+alt+f12",
+    "panic_file": "",
+    "visual_indicator": true,
+    "confirm_threshold": "high",
+    "confirm_timeout_s": 30,
+    "idle_timeout_s": 0,
+    "idle_action": "standby",
+    "default_rule": "allow",
+    "rules": [
+      {
+        "match": {
+          "tool": "keyboard.type",
+          "argument": {"name": "text", "matcher": "glob", "value": "rm -rf*"}
+        },
+        "effect": "deny"
+      }
+    ]
+  },
+  "a11y": {
+    "default_level": "standard",
+    "max_name_len": 64,
+    "include_rects": true,
+    "hard_walk_cap": 5000
+  },
+  "runtime": {
+    "batch_gap_ms": 150,
+    "max_wait_ms": 600000
+  }
+}

@@ -1,0 +1,7 @@
+# Optional platform capabilities. Install to enable:
+#   - comtypes : accessibility tree (UIA) semantic actions on Windows  [pip install -r requirements-optional.txt]
+#   - mss      : faster, more reliable multi-monitor screen capture on Windows
+#   - keyboard : global hotkey support on macOS/Linux (Windows uses a built-in poller)
+comtypes>=1.2
+mss>=9
+keyboard>=0.13

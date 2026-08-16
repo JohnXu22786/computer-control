@@ -1,0 +1,21 @@
+{
+  "comment": "示例：一个观察-执行-验证的会话脚本（dry-run 平台下可安全演练）。模型视角的推荐循环。",
+  "session": {
+    "config": {
+      "platform": {"name": "dry-run"},
+      "safety": {"confirm_threshold": "moderate"}
+    }
+  },
+  "steps": [
+    {"tool": "screen.capture", "arguments": {"format": "jpeg", "scale": 0.5}, "note": "观察桌面"},
+    {"tool": "wait.pause", "arguments": {"ms": 200}, "note": "等待界面稳定"},
+    {"tool": "a11y.snapshot", "arguments": {"level": "skeleton"}, "note": "语义视图"},
+    {"tool": "a11y.activate", "arguments": {"snapshot_id": "snap-1", "node_id": 3}, "note": "语义点击（示例 id，实际以快照为准）"},
+    {"tool": "keyboard.type", "arguments": {"text": "hello", "submit": true}},
+    {"tool": "screen.capture", "arguments": {}, "note": "验证结果"}
+  ],
+  "high_risk_demo": [
+    {"tool": "keyboard.combo", "arguments": {"keys": ["win", "r"]}, "note": "该动作触发确认流"},
+    {"tool": "keyboard.combo", "arguments": {"keys": "ctrl+alt+f12"}, "note": "注意：这是默认急停热键，勿在真实会话中模拟"}
+  ]
+}

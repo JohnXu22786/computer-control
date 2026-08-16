@@ -1,0 +1,517 @@
+{
+  "schema_version": 1,
+  "id": "computer-control",
+  "name": "computer-control",
+  "title": "Computer Control",
+  "description": "Desktop control plugin for the dsh harness: screen capture, pointer and keyboard injection, accessibility-tree driven semantic actions, with an emergency stop, allow/deny rules, confirmation flow and idle standby.",
+  "version": "0.1.0",
+  "author": "plugin-contributors",
+  "license": "MIT",
+  "entry": {
+    "command": [
+      "python",
+      "-m",
+      "computer_control",
+      "serve"
+    ],
+    "working_directory": "."
+  },
+  "transport": {
+    "type": "stdio-jsonrpc",
+    "framing": "line-delimited-json",
+    "encoding": "utf-8",
+    "protocol_version": "2.0"
+  },
+  "lifecycle": {
+    "start": "session.start",
+    "stop": "session.stop"
+  },
+  "config_schema": "docs/configuration.md",
+  "tools": [
+    {
+      "name": "a11y.activate",
+      "summary": "Semantically activate an element from the latest snapshot (invoke/toggle/select pattern first; pixel click on its bounding box as fallback).",
+      "risk": "moderate",
+      "availability": "platform dependent",
+      "parameters": [
+        {
+          "name": "snapshot_id",
+          "type": "str",
+          "description": "The snapshot_id of the most recent a11y.snapshot. Stale ids are rejected.",
+          "required": true
+        },
+        {
+          "name": "node_id",
+          "type": "int",
+          "description": "Element id from that snapshot.",
+          "required": true,
+          "minimum": 1
+        },
+        {
+          "name": "method",
+          "type": "str",
+          "description": "auto = pattern then pointer fallback; pattern = patterns only; pointer = skip patterns.",
+          "required": false,
+          "default": "auto",
+          "choices": [
+            "auto",
+            "pattern",
+            "pointer"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a11y.input",
+      "summary": "Semantically set text on an editable element from the latest snapshot (value pattern first; click-and-type as fallback).",
+      "risk": "moderate",
+      "availability": "platform dependent",
+      "parameters": [
+        {
+          "name": "snapshot_id",
+          "type": "str",
+          "description": "The snapshot_id of the most recent a11y.snapshot. Stale ids are rejected.",
+          "required": true
+        },
+        {
+          "name": "node_id",
+          "type": "int",
+          "description": "Element id from that snapshot.",
+          "required": true,
+          "minimum": 1
+        },
+        {
+          "name": "text",
+          "type": "str",
+          "description": "Text to enter.",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "a11y.snapshot",
+      "summary": "Semantic view of the desktop: a hierarchical summary of the accessibility tree with token-cost levels (skeleton/standard/full).",
+      "risk": "benign",
+      "availability": "platform dependent",
+      "parameters": [
+        {
+          "name": "level",
+          "type": "str",
+          "description": "Summary density: skeleton (cheap), standard, full (expensive).",
+          "required": false,
+          "default": "standard",
+          "choices": [
+            "skeleton",
+            "standard",
+            "full"
+          ]
+        },
+        {
+          "name": "depth",
+          "type": "int",
+          "description": "Override tree depth.",
+          "required": false,
+          "minimum": 1,
+          "maximum": 40
+        },
+        {
+          "name": "max_nodes",
+          "type": "int",
+          "description": "Override maximum summarized nodes.",
+          "required": false,
+          "minimum": 1,
+          "maximum": 10000
+        },
+        {
+          "name": "include_rects",
+          "type": "bool",
+          "description": "Include element bounding rectangles (needed for pointer fallback).",
+          "required": false,
+          "default": true
+        }
+      ]
+    },
+    {
+      "name": "batch.execute",
+      "summary": "Run several actions in one call to cut round trips. Each item is individually gated by the safety policy; the whole batch is confirmation-gated if any item is high-risk.",
+      "risk": "benign",
+      "availability": "platform dependent",
+      "parameters": [
+        {
+          "name": "items",
+          "type": "list",
+          "description": "List of {tool, arguments} objects.",
+          "required": true
+        },
+        {
+          "name": "continue_on_error",
+          "type": "bool",
+          "description": "Keep running after an item fails.",
+          "required": false,
+          "default": false
+        },
+        {
+          "name": "gap_ms",
+          "type": "int",
+          "description": "Pause between items.",
+          "required": false,
+          "default": 150,
+          "minimum": 0,
+          "maximum": 60000
+        }
+      ]
+    },
+    {
+      "name": "keyboard.combo",
+      "summary": "Press several keys together as a chord, e.g. ctrl+shift+esc. Chords that include win or ctrl+alt are high-risk and trigger the confirmation flow.",
+      "risk": "moderate",
+      "availability": "platform dependent",
+      "parameters": [
+        {
+          "name": "keys",
+          "type": "list",
+          "description": "Chord keys as a list ['ctrl','shift','esc'] or a string 'ctrl+shift+esc'.",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "keyboard.press",
+      "summary": "Press and release a single key (letters, digits, F-keys, arrows, punctuation).",
+      "risk": "moderate",
+      "availability": "platform dependent",
+      "parameters": [
+        {
+          "name": "key",
+          "type": "str",
+          "description": "Key name, e.g. 'enter', 'f5', 'a', '1', 'left'.",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "keyboard.type",
+      "summary": "Type text via keyboard events. Newlines become Enter, tabs become Tab.",
+      "risk": "moderate",
+      "availability": "platform dependent",
+      "parameters": [
+        {
+          "name": "text",
+          "type": "str",
+          "description": "Text to type (UTF-8, up to 10000 characters).",
+          "required": true
+        },
+        {
+          "name": "submit",
+          "type": "bool",
+          "description": "Press Enter after the text.",
+          "required": false,
+          "default": false
+        },
+        {
+          "name": "interval_ms",
+          "type": "int",
+          "description": "Delay between characters.",
+          "required": false,
+          "default": 0,
+          "minimum": 0,
+          "maximum": 1000
+        }
+      ]
+    },
+    {
+      "name": "pointer.click",
+      "summary": "Click with a button, optionally after moving to a position. Prefer a11y.activate when the element is visible in the accessibility tree.",
+      "risk": "moderate",
+      "availability": "platform dependent",
+      "parameters": [
+        {
+          "name": "x",
+          "type": "float",
+          "description": "Model-space x coordinate; omit to click at the current pointer position.",
+          "required": false,
+          "minimum": 0
+        },
+        {
+          "name": "y",
+          "type": "float",
+          "description": "Model-space y coordinate; omit to click at the current pointer position.",
+          "required": false,
+          "minimum": 0
+        },
+        {
+          "name": "button",
+          "type": "str",
+          "description": "Which button.",
+          "required": false,
+          "default": "left",
+          "choices": [
+            "left",
+            "middle",
+            "right"
+          ]
+        },
+        {
+          "name": "times",
+          "type": "int",
+          "description": "1, 2 or 3 (single, double, triple click).",
+          "required": false,
+          "default": 1,
+          "minimum": 1,
+          "maximum": 3
+        },
+        {
+          "name": "hold_ms",
+          "type": "int",
+          "description": "Hold the button down this long before releasing.",
+          "required": false,
+          "default": 0,
+          "minimum": 0,
+          "maximum": 10000
+        }
+      ]
+    },
+    {
+      "name": "pointer.drag",
+      "summary": "Press a button at one position, move to another position, then release.",
+      "risk": "moderate",
+      "availability": "platform dependent",
+      "parameters": [
+        {
+          "name": "from",
+          "type": "region",
+          "description": "Start position {x, y} in model space.",
+          "required": true
+        },
+        {
+          "name": "to",
+          "type": "region",
+          "description": "End position {x, y} in model space.",
+          "required": true
+        },
+        {
+          "name": "button",
+          "type": "str",
+          "description": "Which button to hold.",
+          "required": false,
+          "default": "left",
+          "choices": [
+            "left",
+            "middle",
+            "right"
+          ]
+        },
+        {
+          "name": "steps",
+          "type": "int",
+          "description": "Number of interpolation steps between the two positions.",
+          "required": false,
+          "default": 24,
+          "minimum": 1,
+          "maximum": 400
+        },
+        {
+          "name": "hold_ms",
+          "type": "int",
+          "description": "Pause at the destination before releasing.",
+          "required": false,
+          "default": 0,
+          "minimum": 0,
+          "maximum": 10000
+        }
+      ]
+    },
+    {
+      "name": "pointer.move",
+      "summary": "Move the mouse pointer to a model-space position without clicking.",
+      "risk": "moderate",
+      "availability": "platform dependent",
+      "parameters": [
+        {
+          "name": "x",
+          "type": "float",
+          "description": "Model-space x coordinate.",
+          "required": true,
+          "minimum": 0
+        },
+        {
+          "name": "y",
+          "type": "float",
+          "description": "Model-space y coordinate.",
+          "required": true,
+          "minimum": 0
+        },
+        {
+          "name": "steps",
+          "type": "int",
+          "description": "Interpolation steps for a smooth move (1 = instant).",
+          "required": false,
+          "default": 1,
+          "minimum": 1,
+          "maximum": 200
+        }
+      ]
+    },
+    {
+      "name": "pointer.scroll",
+      "summary": "Scroll the wheel at the current pointer position (or after moving to a position).",
+      "risk": "moderate",
+      "availability": "platform dependent",
+      "parameters": [
+        {
+          "name": "axis",
+          "type": "str",
+          "description": "Scroll axis.",
+          "required": false,
+          "default": "vertical",
+          "choices": [
+            "vertical",
+            "horizontal"
+          ]
+        },
+        {
+          "name": "amount",
+          "type": "float",
+          "description": "Wheel notches, signed: positive = up/right, negative = down/left.",
+          "required": true,
+          "minimum": -100,
+          "maximum": 100
+        },
+        {
+          "name": "x",
+          "type": "float",
+          "description": "Move here first (model space).",
+          "required": false,
+          "minimum": 0
+        },
+        {
+          "name": "y",
+          "type": "float",
+          "description": "Move here first (model space).",
+          "required": false,
+          "minimum": 0
+        }
+      ]
+    },
+    {
+      "name": "screen.capture",
+      "summary": "Capture the desktop (or a region) as an image. The returned data URL is exactly the model-space canvas the coordinates below refer to.",
+      "risk": "benign",
+      "availability": "platform dependent",
+      "parameters": [
+        {
+          "name": "region",
+          "type": "region",
+          "description": "Model-space region {x, y, width, height} to capture; omit for the whole desktop.",
+          "required": false
+        },
+        {
+          "name": "format",
+          "type": "str",
+          "description": "Image encoding: png or jpeg (jpeg costs fewer tokens).",
+          "required": false,
+          "default": "png",
+          "choices": [
+            "png",
+            "jpeg"
+          ]
+        },
+        {
+          "name": "quality",
+          "type": "int",
+          "description": "JPEG quality 1-100 (ignored for png).",
+          "required": false,
+          "default": 85,
+          "minimum": 1,
+          "maximum": 100
+        },
+        {
+          "name": "scale",
+          "type": "float",
+          "description": "Relative canvas scale 0.1-1.0; smaller = fewer tokens.",
+          "required": false,
+          "default": 1.0,
+          "minimum": 0.1,
+          "maximum": 1.0
+        },
+        {
+          "name": "grayscale",
+          "type": "bool",
+          "description": "Convert to grayscale to save tokens.",
+          "required": false,
+          "default": false
+        }
+      ]
+    },
+    {
+      "name": "wait.pause",
+      "summary": "Wait, letting the UI settle. Use before screenshots after actions that trigger animation.",
+      "risk": "benign",
+      "availability": "platform dependent",
+      "parameters": [
+        {
+          "name": "ms",
+          "type": "int",
+          "description": "Milliseconds to wait.",
+          "required": true,
+          "minimum": 0,
+          "maximum": 600000
+        }
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "session.started",
+      "summary": "A session began and is ready for tools."
+    },
+    {
+      "name": "session.stopped",
+      "summary": "A session ended; further tool calls are rejected until a new session starts."
+    },
+    {
+      "name": "session.resumed",
+      "summary": "A stopped or standby session returned to ready."
+    },
+    {
+      "name": "session.configured",
+      "summary": "Runtime configuration was applied."
+    },
+    {
+      "name": "session.idle",
+      "summary": "No actions for the configured idle timeout; the session entered standby."
+    },
+    {
+      "name": "action.started",
+      "summary": "A tool call began executing."
+    },
+    {
+      "name": "action.finished",
+      "summary": "A tool call finished, with its result envelope."
+    },
+    {
+      "name": "batch.finished",
+      "summary": "A batch completed with the aggregated results."
+    },
+    {
+      "name": "safety.confirmation_requested",
+      "summary": "A high-risk action is pending human approval; the harness must ask the user."
+    },
+    {
+      "name": "safety.confirmation_resolved",
+      "summary": "A pending confirmation was approved or denied."
+    },
+    {
+      "name": "safety.confirmation_expired",
+      "summary": "A pending confirmation timed out and was denied."
+    },
+    {
+      "name": "safety.panic_triggered",
+      "summary": "The emergency stop engaged (hotkey, protocol request or panic file)."
+    },
+    {
+      "name": "safety.panic_released",
+      "summary": "The emergency stop was disengaged."
+    }
+  ]
+}
