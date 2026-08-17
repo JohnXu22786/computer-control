@@ -1,0 +1,15 @@
+# computer-control —— dsh bundle 安装行。
+#
+# dsh 读取本文件并把下面的插件行插入当前 profile 的 cordis 配置：
+#   id   插件标识（dsh 内唯一）
+#   name 引用的 npm 包名（dsh 由此加载 index.js 的 apply(ctx)）
+#
+# 可以在 config 下覆盖子项，例如：
+#   config:
+#     safety:
+#       confirm_threshold: moderate
+#     platform:
+#       name: dry-run
+- insert:
+    - id: computer-control
+      name: dsh-computer-control
