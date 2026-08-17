@@ -122,6 +122,25 @@ class EventCollector(threading.Thread):
                 return
 
 
+class TestRequestIds(unittest.TestCase):
+    """Request ids must be unique across client instances so two clients
+    talking to the same server never collide (round-3 regression)."""
+
+    def test_ids_differ_across_instances(self):
+        from computer_control.client import _BaseClient
+
+        first = _BaseClient.__new__(_BaseClient)
+        second = _BaseClient.__new__(_BaseClient)
+        self.assertNotEqual(first._next_id(), second._next_id())
+
+    def test_ids_are_monotonic_within_an_instance(self):
+        from computer_control.client import _BaseClient
+
+        client = _BaseClient.__new__(_BaseClient)
+        ids = {client._next_id() for _ in range(50)}
+        self.assertEqual(len(ids), 50)
+
+
 class TestEventsTransport(unittest.TestCase):
     def test_stdio_events_collected_by_thread(self):
         collected = []

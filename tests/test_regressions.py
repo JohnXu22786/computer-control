@@ -493,6 +493,36 @@ class TestHttpTransport(unittest.TestCase):
             self.assertTrue(json.loads(resp.read())["ok"])
 
 
+class TestCallTimeout(unittest.TestCase):
+    """Round-3: the per-call timeout must be derived from runtime.max_wait_ms
+    instead of a hardcoded 300s floor, so a stuck action fails fast when
+    configured so."""
+
+    def test_timeout_is_derived_from_max_wait_ms(self):
+        import threading as _t
+        from computer_control.config import from_dict
+
+        recorded = {}
+
+        def recording_wait(self, timeout=None):
+            if timeout is not None:
+                recorded["timeout"] = timeout
+            return original_wait(self, timeout)
+
+        original_wait = _t.Event.wait
+        _t.Event.wait = recording_wait
+        session = Session(emit=lambda t, p=None: None,
+                          driver_factory=lambda cfg: NullDriver(enable_a11y=True))
+        try:
+            session.start({"runtime": {"max_wait_ms": 200}})
+            session.call("pointer.move", {"x": 10, "y": 10})
+        finally:
+            _t.Event.wait = original_wait
+            session.stop()
+        # 200ms budget + 60s grace; the old code waited at least 300s.
+        self.assertAlmostEqual(recorded.get("timeout"), 60.2)
+
+
 class TestCheckExitCode(unittest.TestCase):
     def test_check_reports_invalid_config_with_nonzero_exit(self):
         import subprocess
