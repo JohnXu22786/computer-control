@@ -66,6 +66,21 @@ Remove with:
 dsh plugin --profile demo remove computer-control
 ```
 
+### dsh bundle
+
+The repo also ships a Cordis bundle so anything that consumes `dsh.bundle`
+manifests can install it the same way: `package.json` declares
+`dsh.bundle.patch` pointing at `cordis.patch.yml`, and `index.js` is the bridge
+a dsh profile loads. It spawns `python -m computer_control serve` as a child
+process and re-exposes every tool from `manifest.json` to the harness over the
+stdio protocol — the Python core is left untouched. Profile-level settings can
+be pinned through the patch row's `config` (e.g. `platform.name: dry-run` for a
+rehearsal-only install).
+
+Requirements for the bridge: `node >= 18` and a Python 3.9+ interpreter with
+this package installed (`pip install -r requirements.txt` is enough for the
+core tools).
+
 ## Installation
 
 Requirements: **Python 3.9+**, Windows 10/11 (full functionality); other platforms see "Platform Support".
