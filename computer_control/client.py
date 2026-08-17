@@ -124,14 +124,23 @@ class StdioClient(_BaseClient):
         return response
 
     def close(self) -> None:
+        process = self._process
         try:
-            self._process.terminate()
+            process.stdin.close()
         except Exception:
             pass
         try:
-            self._process.wait(timeout=2)
+            process.terminate()
         except Exception:
-            self._process.kill()
+            pass
+        try:
+            process.wait(timeout=2)
+        except Exception:
+            process.kill()
+        try:
+            process.stdout.close()
+        except Exception:
+            pass
 
 
 class HttpClient(_BaseClient):
