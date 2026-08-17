@@ -1,0 +1,24 @@
+{
+  "name": "dsh-computer-control",
+  "version": "0.1.0",
+  "description": "dsh bundle for computer-control: desktop control (screen capture, pointer/keyboard injection, accessibility-tree semantic actions, safety guards) bridged to the harness over stdio JSON-RPC.",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "manifest.json",
+    "LICENSE",
+    "README.md",
+    "README.zh.md"
+  ],
+  "engines": {
+    "node": ">=18.17"
+  },
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
