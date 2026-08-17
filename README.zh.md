@@ -54,6 +54,27 @@ computer-control/
 └── tests/                   # 纯逻辑与协议测试（不触碰真实硬件）
 ```
 
+## 在 dsh 中安装
+
+```bash
+dsh plugin --profile demo add github:JohnXu22786/computer-control
+```
+
+卸载：
+
+```bash
+dsh plugin --profile demo remove computer-control
+```
+
+### dsh bundle
+
+仓库同时提供 Cordis bundle，凡是消费 `dsh.bundle` 清单的环境都可以同样方式安装：`package.json` 声明
+`dsh.bundle.patch` 指向 `cordis.patch.yml`，`index.js` 即 dsh profile 加载的桥接层。它以子进程方式启动
+`python -m computer_control serve`，把 `manifest.json` 中声明的全部工具经 stdio 协议重新暴露给 harness——
+Python 核心保持不变。profile 级设置可通过 patch 行的 `config` 固定（例如 `platform.name: dry-run` 实现只演练安装）。
+
+桥接层要求：`node >= 18`，且环境中装有 Python 3.9+ 并安装本包（核心工具只需 `pip install -r requirements.txt`）。
+
 ## 安装
 
 要求：**Python 3.9+**，Windows 10/11（完整功能）；其他平台见「平台支持」。
