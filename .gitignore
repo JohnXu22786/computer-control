@@ -3,4 +3,13 @@ dist/
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
+*.egg-info/
+build/
+out/
+.coverage
+htmlcov/
 .DS_Store
+.idea/
+.vscode/
+*.swp
