@@ -97,6 +97,12 @@ function createClient(config, log) {
           waiter.reject(new Error('computer-control server exited; is `python -m computer_control serve` runnable?'));
         pending.clear();
       });
+      // The child's pipe streams emit 'error' independently of the child
+      // process events; an abrupt server death (EPIPE on a late write) would
+      // otherwise surface as an unhandled stream error and crash the host.
+      child.stdin.on('error', () => {});
+      child.stdout.on('error', () => {});
+      child.stderr.on('error', () => {});
       child.stdout.setEncoding('utf8');
       child.stdout.on('data', (chunk) => {
         buffer += chunk;
