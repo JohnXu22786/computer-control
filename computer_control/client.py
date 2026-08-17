@@ -50,9 +50,13 @@ class _BaseClient:
         pass
 
     def _next_id(self) -> int:
-        with self._id_lock:
-            self._counter += 1
-            return self._counter
+        # The counter is shared across every client instance (class-level), so
+        # two clients talking to the same server never issue colliding ids.
+        # `self._counter += 1` would create an instance attribute instead and
+        # restart every client at 1 - the collision this is meant to prevent.
+        with _BaseClient._id_lock:
+            _BaseClient._counter += 1
+            return _BaseClient._counter
 
     _counter = 0
     _id_lock = threading.Lock()
