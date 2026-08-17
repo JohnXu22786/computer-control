@@ -230,7 +230,11 @@ class Session:
                 return _error("not_started", "no session is running; call session.start first")
             engine = self._engine
             queue_ = self._worker_queue
-            timeout_s = max(300.0, self._cfg.runtime.max_wait_ms / 1000.0 + 60.0)
+            # The configured max_wait_ms governs how long an action may run;
+            # the +60s grace covers queueing behind earlier actions. A tiny
+            # floor keeps degenerate configs (max_wait_ms=1) from timing out
+            # before the task even starts.
+            timeout_s = max(0.5, self._cfg.runtime.max_wait_ms / 1000.0 + 60.0)
         outcome = threading.Event()
         holder = {"result": _error("driver_failed", "the action raised an internal error")}
         task = (lambda: holder.update(result=engine.run_tool(tool, arguments)), outcome, holder)
