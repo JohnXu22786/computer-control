@@ -405,10 +405,7 @@ def clean_arguments(tool: str, raw_args) -> dict:
     elif tool == "pointer.scroll":
         if (cleaned.get("x") is None) != (cleaned.get("y") is None):
             issues.append("x and y must be given together (or neither)")
-    elif tool == "screen.capture":
-        if cleaned.get("format") == "jpeg" and cleaned.get("quality") is None:
-            issues.append("quality is required for jpeg")
-    elif tool in ("keyboard.type", "a11y.input"):
+    elif tool == "keyboard.type" or tool == "a11y.input":
         text = cleaned.get("text")
         if isinstance(text, str) and len(text) > 10000:
             issues.append("text: too long (%d characters, max 10000)" % len(text))
