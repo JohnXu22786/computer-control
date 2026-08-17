@@ -3,6 +3,23 @@
 All notable changes are tracked here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Fixed
+
+- Per-call timeouts now honor `runtime.max_wait_ms` instead of a hardcoded
+  300s floor, so a configured small budget actually fails fast.
+- Client request ids are unique across client instances; two clients sharing
+  one server can no longer collide and cross-talk responses.
+- The dsh bridge tolerates an abrupt server death without crashing the host
+  on an unhandled pipe-stream error.
+
+### Chore
+
+- Removed an unreachable validation branch (`screen.capture` jpeg quality is
+  always defaulted before validation).
+- Chinese README now mirrors the English one's dsh bundle section.
+
 ## [0.1.0] - 2026-08-16
 
 Initial release of the computer-control desktop plugin for dsh.
