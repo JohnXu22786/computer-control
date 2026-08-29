@@ -11,6 +11,8 @@ All notable changes are tracked here. Format loosely follows
 
 ### Fixed
 
+- Aligned JSON-RPC 2.0 error codes to standard values (`-32603` for internal errors, `-32000` for server errors).
+- Handled non-object JSON payloads and malformed requests gracefully in `serve_stdio` with standard `-32600` (Invalid Request) responses.
 - Disallowed `bool` values in configuration integer/float parsers (`_expect_int`, `_expect_float`) to prevent booleans from passing as numbers.
 - Tolerated empty or whitespace-only `COMPUTER_CONTROL_CONFIG` environment variables by falling back to default configuration.
 - Sanitized boundary execution arguments in `Engine` for pointer moves, clicks, drags, scrolls, and keyboard type delays.
