@@ -628,5 +628,20 @@ class TestNullDriverCompleteness(unittest.TestCase):
         self.assertFalse(driver.hotkey_probe(["ctrl", "alt", "f12"]))
 
 
+class TestManifestParity(unittest.TestCase):
+    def test_manifest_file_matches_manifest_generator(self):
+        import json
+        import os
+        from computer_control.manifest import manifest
+
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        manifest_path = os.path.join(repo_root, "manifest.json")
+        self.assertTrue(os.path.exists(manifest_path))
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            on_disk = json.load(f)
+        generated = manifest()
+        self.assertEqual(on_disk, generated)
+
+
 if __name__ == "__main__":
     unittest.main()

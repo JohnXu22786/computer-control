@@ -199,6 +199,35 @@ class TestHttpClient(unittest.TestCase):
         client.close()
         self.assertFalse(client._sse_thread.is_alive())
 
+    def test_http_client_connection_failure_raises_client_error(self):
+        # Port 1 is almost certainly closed/unreachable
+        client = HttpClient("http://127.0.0.1:1", timeout=1.0)
+        try:
+            with self.assertRaises(ClientError) as ctx:
+                client.call("system.status")
+            self.assertIn("connection failed", str(ctx.exception).lower())
+        finally:
+            client.close()
+
+    def test_base_client_malformed_response_raises_client_error(self):
+        from computer_control.client import _BaseClient
+
+        class DummyClient(_BaseClient):
+            def __init__(self, fake_resp):
+                super().__init__()
+                self._fake_resp = fake_resp
+
+            def _transact(self, request, timeout):
+                return self._fake_resp
+
+        client1 = DummyClient("not a dict")
+        with self.assertRaises(ClientError):
+            client1.call("system.status")
+
+        client2 = DummyClient({"jsonrpc": "2.0", "id": 1})  # missing result & error
+        with self.assertRaises(ClientError):
+            client2.call("system.status")
+
 
 if __name__ == "__main__":
     unittest.main()
