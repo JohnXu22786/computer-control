@@ -39,8 +39,12 @@ class _BaseClient:
         if params is not None:
             request["params"] = params
         response = self._transact(request, timeout)
-        if "error" in response:
+        if not isinstance(response, dict):
+            raise ClientError("expected json object response, got %r" % (response,))
+        if "error" in response and response["error"] is not None:
             raise ClientError("jsonrpc error: %s" % response["error"], response)
+        if "result" not in response:
+            raise ClientError("missing result in response", response)
         return response["result"]
 
     def events(self, block: bool = True, timeout: Optional[float] = None):
@@ -164,13 +168,21 @@ class HttpClient(_BaseClient):
                                      headers={"Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=timeout or self._timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+                raw = resp.read().decode("utf-8")
+                try:
+                    return json.loads(raw)
+                except ValueError as exc:
+                    raise ClientError("malformed json response: %s" % exc)
         except urllib.error.HTTPError as exc:
             try:
                 body = json.loads(exc.read().decode("utf-8"))
             except Exception:
                 body = None
             raise ClientError("http %s" % exc.code, body)
+        except urllib.error.URLError as exc:
+            raise ClientError("connection failed: %s" % exc.reason)
+        except (TimeoutError, OSError) as exc:
+            raise ClientError("connection failed: %s" % exc)
 
     def _sse_loop(self) -> None:
         try:
@@ -205,9 +217,14 @@ class HttpClient(_BaseClient):
         resp = self._sse_response
         if resp is not None:
             try:
+                if hasattr(resp, "fp") and resp.fp:
+                    try:
+                        resp.fp.close()
+                    except Exception:
+                        pass
                 resp.close()
             except Exception:
                 pass
         thread = self._sse_thread
         if thread is not None and thread.is_alive():
-            thread.join(timeout=1.0)
+            thread.join(timeout=2.0)

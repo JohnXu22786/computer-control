@@ -11,6 +11,8 @@ All notable changes are tracked here. Format loosely follows
 
 ### Fixed
 
+- Handled URLError, connection timeouts, and malformed JSON responses in `HttpClient` and `_BaseClient`, converting them into typed `ClientError` exceptions.
+- Added manifest validation regression test asserting complete parity between `manifest()` and `manifest.json`.
 - Aligned JSON-RPC 2.0 error codes to standard values (`-32603` for internal errors, `-32000` for server errors).
 - Handled non-object JSON payloads and malformed requests gracefully in `serve_stdio` with standard `-32600` (Invalid Request) responses.
 - Disallowed `bool` values in configuration integer/float parsers (`_expect_int`, `_expect_float`) to prevent booleans from passing as numbers.
