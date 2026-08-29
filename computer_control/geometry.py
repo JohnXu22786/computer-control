@@ -29,7 +29,7 @@ class Rect:
     def from_bbox(cls, bbox):
         """Build from a (left, top, right, bottom) tuple."""
         left, top, right, bottom = bbox
-        return cls(left, top, right - left, bottom - top)
+        return cls(float(left), float(top), float(right - left), float(bottom - top))
 
     def as_bbox(self) -> Tuple[int, int, int, int]:
         """(left, top, right, bottom) with outward rounding so the rect is fully covered."""
@@ -44,9 +44,11 @@ class Rect:
         return self.x <= x < self.x + self.width and self.y <= y < self.y + self.height
 
     def clamp_point(self, x: float, y: float) -> Tuple[int, int]:
+        max_x = max(self.x, self.x + self.width - 1)
+        max_y = max(self.y, self.y + self.height - 1)
         return (
-            int(round(min(max(x, self.x), self.x + self.width - 1))),
-            int(round(min(max(y, self.y), self.y + self.height - 1))),
+            int(round(min(max(float(x), self.x), max_x))),
+            int(round(min(max(float(y), self.y), max_y))),
         )
 
 

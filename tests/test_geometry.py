@@ -21,6 +21,16 @@ class TestRect(unittest.TestCase):
     def test_clamp_point(self):
         r = Rect(0, 0, 100, 100)
         self.assertEqual(r.clamp_point(-20, 150), (0, 99))
+        small = Rect(10, 20, 0.5, 0.5)
+        self.assertEqual(small.clamp_point(5, 5), (10, 20))
+        self.assertEqual(small.clamp_point(50, 50), (10, 20))
+
+    def test_from_bbox(self):
+        r = Rect.from_bbox((10, 20, 110, 220))
+        self.assertEqual(r.x, 10.0)
+        self.assertEqual(r.y, 20.0)
+        self.assertEqual(r.width, 100.0)
+        self.assertEqual(r.height, 200.0)
 
 
 class TestSurface(unittest.TestCase):
