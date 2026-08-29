@@ -492,6 +492,18 @@ class TestHttpTransport(unittest.TestCase):
             self.assertEqual(resp.status, 200)
             self.assertTrue(json.loads(resp.read())["ok"])
 
+    def test_sse_disconnect_tolerated(self):
+        import socket
+
+        # Connect via socket and close immediately to simulate abrupt client disconnect
+        s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        s.sendall(b"GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        s.recv(128)  # Read status line / initial header bytes
+        s.close()
+        # Server should continue responding normally
+        status, body = self._post(b'{"jsonrpc":"2.0","id":2,"method":"system.status","params":{}}')
+        self.assertEqual(status, 200)
+
 
 class TestCallTimeout(unittest.TestCase):
     """Round-3: the per-call timeout must be derived from runtime.max_wait_ms

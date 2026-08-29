@@ -7,6 +7,9 @@ All notable changes are tracked here. Format loosely follows
 
 ### Fixed
 
+- Handled HTTP SSE client disconnections gracefully across replay, event broadcast, and keepalives without uncaught socket exceptions.
+- Implemented `HttpClient.close()` to stop background SSE reader threads and terminate HTTP connections cleanly.
+- Expanded `is_modifier` and `MODIFIER_NAMES` in `keys.py` to recognize all modifier aliases (`lctrl`, `rctrl`, `lalt`, `ralt`, `lshift`, `rshift`, `lwin`, `rwin`, `super`, `meta`).
 - Fixed batch execution plan integrity where actions occurring after a confirming item were dropped from the batch payload upon approval.
 - Fixed `_stash_batch_payload` to pre-scan, validate, and apply defaults across all batch items.
 - Fixed `Surface.clamp_point` return type to return integer coordinates matching the contract.

@@ -89,10 +89,11 @@ class TestParseHotkey(unittest.TestCase):
 
 class TestIsModifier(unittest.TestCase):
     def test_modifier_names(self):
-        for name in ("ctrl", "alt", "shift", "win"):
-            self.assertTrue(is_modifier(name))
-            self.assertTrue(is_modifier(name.upper()))
-        for name in ("left", "enter", "f5", "a"):
+        for name in ("ctrl", "alt", "shift", "win", "lctrl", "rctrl", "lalt", "ralt",
+                     "lshift", "rshift", "lwin", "rwin", "super", "meta"):
+            self.assertTrue(is_modifier(name), name)
+            self.assertTrue(is_modifier(name.upper()), name)
+        for name in ("left", "enter", "f5", "a", "space", "backspace"):
             self.assertFalse(is_modifier(name))
 
 

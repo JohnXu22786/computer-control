@@ -265,8 +265,8 @@ def make_http_server(router: Router, host: str, port: int):
                             self.wfile.write(b": keepalive\n\n")
                             self.wfile.flush()
                             keepalive = time.monotonic()
-                    except (BrokenPipeError, ConnectionResetError):
-                        break
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+                pass
             finally:
                 ring.unsubscribe(queue_)
 

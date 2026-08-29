@@ -7,7 +7,12 @@ Non-Windows drivers may interpret the same names in their own way.
 
 from __future__ import annotations
 
-MODIFIER_NAMES = ("ctrl", "alt", "shift", "win")
+MODIFIER_NAMES = (
+    "ctrl", "lctrl", "rctrl",
+    "alt", "lalt", "ralt",
+    "shift", "lshift", "rshift",
+    "win", "lwin", "rwin", "super", "meta",
+)
 
 # Virtual-key codes for the common desktop keys.
 KEY_ALIASES = {
