@@ -61,6 +61,11 @@ class TestParseKeyFull(unittest.TestCase):
             vk, extended = parse_key_full(name)
             self.assertFalse(extended, name)
 
+    def test_parse_key_full_rejects_none_and_empty(self):
+        for bad in (None, "", "  ", 123):
+            with self.assertRaises(UnknownKeyError):
+                parse_key_full(bad)
+
 
 class TestParseHotkey(unittest.TestCase):
     def test_empty_disables(self):

@@ -401,6 +401,27 @@ class TestBaseConfig(unittest.TestCase):
         finally:
             session.stop()
 
+    def test_read_surface_degenerate_virtual_screen_fallback(self):
+        class ZeroSizeDriver(NullDriver):
+            def desktop_info(self):
+                return {"platform": "mock", "virtual_screen": {"x": 0, "y": 0, "width": 0, "height": 0}}
+
+        session = Session(emit=lambda t, p=None: None, driver_factory=lambda cfg: ZeroSizeDriver())
+        try:
+            r = session.start({})
+            self.assertTrue(r["ok"])
+            self.assertEqual(r["result"]["surface"]["display_width_px"], 1920)
+        finally:
+            session.stop()
+
+    def test_session_stopped_emits_once(self):
+        events = []
+        session = Session(emit=lambda t, p=None: events.append(t),
+                          driver_factory=lambda cfg: NullDriver(enable_a11y=True))
+        session.start({})
+        session.stop()
+        self.assertEqual(events.count("session.stopped"), 1)
+
 
 class TestKeyInjectionDetails(unittest.TestCase):
     def test_numpad_enter_resolves_to_return_with_extended_flag(self):

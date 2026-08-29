@@ -441,8 +441,9 @@ def clean_arguments(tool: str, raw_args) -> dict:
     return cleaned
 
 
-def risk_for(tool: str, arguments: dict) -> str:
+def risk_for(tool: str, arguments: Optional[dict] = None) -> str:
     """Effective risk of a tool call, after argument inspection."""
+    arguments = arguments or {}
     spec = get_spec(tool)
     if spec is None:
         return RISK_MODERATE

@@ -112,6 +112,8 @@ def parse_key_full(name: str):
     (VK_RETURN, True) so it can be injected as the numpad key rather than the
     main Enter.
     """
+    if not isinstance(name, str) or not name.strip():
+        raise UnknownKeyError("empty key name")
     normalized = name.strip().lower()
     if normalized == "numpad_enter":
         return KEY_ALIASES["enter"], True
