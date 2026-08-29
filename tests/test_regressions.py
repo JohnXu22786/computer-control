@@ -573,5 +573,41 @@ class TestCheckExitCode(unittest.TestCase):
             self.assertNotEqual(proc.returncode, 0)
 
 
+class TestCliCommands(unittest.TestCase):
+    def test_version_flag(self):
+        import subprocess
+        import sys
+        from computer_control.version import __version__
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "computer_control", "--version"],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn(__version__, proc.stdout + proc.stderr)
+
+    def test_list_command(self):
+        import subprocess
+        import sys
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "computer_control", "list"],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("screen.capture", proc.stdout)
+
+    def test_list_json_command(self):
+        import subprocess
+        import sys
+        import json
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "computer_control", "list", "--json"],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(proc.returncode, 0)
+        data = json.loads(proc.stdout)
+        self.assertIn("tools", data)
+        self.assertIn("events", data)
+
+
 if __name__ == "__main__":
     unittest.main()

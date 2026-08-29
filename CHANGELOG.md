@@ -5,8 +5,14 @@ All notable changes are tracked here. Format loosely follows
 
 ## Unreleased
 
+### Added
+
+- Added `--version` / `-V` CLI flag to inspect package version from the command line.
+
 ### Fixed
 
+- Hardened `Rect.clamp_point` for rectangles with fractional dimensions smaller than 1.0 unit.
+- Ensured `Rect.from_bbox` produces float attributes for consistent arithmetic operations.
 - Fall back to standard surface geometry when driver virtual screen metrics report non-positive dimensions.
 - Deduplicated `session.stopped` event emission so exactly one event is emitted on session shutdown.
 - Handled `None` argument dictionaries safely in `risk_for` without raising `AttributeError`.

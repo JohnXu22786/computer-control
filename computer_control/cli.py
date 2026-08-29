@@ -15,8 +15,9 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="computer-control",
         description="Desktop control plugin for the dsh harness (version %s)." % __version__,
     )
+    parser.add_argument("--version", "-V", action="version", version="computer-control %s" % __version__)
     parser.add_argument("--config", help="path to a JSON configuration file (or set COMPUTER_CONTROL_CONFIG)")
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=False)
 
     serve = sub.add_parser("serve", help="run the plugin server (stdio by default)")
     serve.add_argument("--config", help="path to a JSON configuration file (or set COMPUTER_CONTROL_CONFIG)")
