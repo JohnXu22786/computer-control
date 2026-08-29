@@ -119,6 +119,33 @@ class TestLoadConfig(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 load_config(path)
 
+    def test_env_var_whitespace_loads_default(self):
+        old = os.environ.get("COMPUTER_CONTROL_CONFIG")
+        try:
+            os.environ["COMPUTER_CONTROL_CONFIG"] = "   "
+            c = load_config(None)
+            self.assertEqual(c.capture.default_width, 1920)
+        finally:
+            if old is not None:
+                os.environ["COMPUTER_CONTROL_CONFIG"] = old
+            else:
+                os.environ.pop("COMPUTER_CONTROL_CONFIG", None)
+
+
+class TestTypeValidation(unittest.TestCase):
+    def test_bool_rejected_for_numeric_fields(self):
+        with self.assertRaises(ConfigError):
+            from_dict({"runtime": {"batch_gap_ms": True}})
+        with self.assertRaises(ConfigError):
+            from_dict({"capture": {"default_width": False}})
+        with self.assertRaises(ConfigError):
+            from_dict({"safety": {"confirm_timeout_s": True}})
+
+    def test_non_dict_section_rejected(self):
+        for sec in ("platform", "capture", "safety", "a11y", "runtime"):
+            with self.assertRaises(ConfigError):
+                from_dict({sec: "not-a-dict"})
+
 
 class TestApplyOverrides(unittest.TestCase):
     def test_apply_overrides_replaces_rules(self):

@@ -11,6 +11,9 @@ All notable changes are tracked here. Format loosely follows
 
 ### Fixed
 
+- Disallowed `bool` values in configuration integer/float parsers (`_expect_int`, `_expect_float`) to prevent booleans from passing as numbers.
+- Tolerated empty or whitespace-only `COMPUTER_CONTROL_CONFIG` environment variables by falling back to default configuration.
+- Sanitized boundary execution arguments in `Engine` for pointer moves, clicks, drags, scrolls, and keyboard type delays.
 - Added semantic name fallback in accessibility tree node building to fall back to element role, localized control type, or help text when element name is empty or whitespace.
 - Implemented `desktop_info`, simulated hotkey probing, and resource cleanup on `NullDriver` for complete test environment parity.
 - Hardened `Rect.clamp_point` for rectangles with fractional dimensions smaller than 1.0 unit.

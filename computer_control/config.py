@@ -44,6 +44,8 @@ def _expect_type(value, types, what, section, key):
 
 
 def _expect_int(value, what, section, key, minimum=None, maximum=None):
+    if isinstance(value, bool):
+        raise ConfigError("%s.%s must be an integer, got %r" % (section, key, value))
     _expect_type(value, (int, float), "a number", section, key)
     if isinstance(value, float) and not value.is_integer():
         raise ConfigError("%s.%s must be an integer, got %r" % (section, key, value))
@@ -56,6 +58,8 @@ def _expect_int(value, what, section, key, minimum=None, maximum=None):
 
 
 def _expect_float(value, what, section, key, minimum=None, maximum=None):
+    if isinstance(value, bool):
+        raise ConfigError("%s.%s must be a number, got %r" % (section, key, value))
     _expect_type(value, (int, float), "a number", section, key)
     value = float(value)
     if minimum is not None and value < minimum:
@@ -332,9 +336,10 @@ def load_config(path: Optional[str]) -> Config:
     The environment variable COMPUTER_CONTROL_CONFIG overrides ``path`` when
     ``path`` is not given explicitly.
     """
-    effective = path or os.environ.get("COMPUTER_CONTROL_CONFIG")
-    if not effective:
+    effective = path if path is not None else os.environ.get("COMPUTER_CONTROL_CONFIG")
+    if not effective or not str(effective).strip():
         return default_config()
+    effective = str(effective).strip()
     if not os.path.exists(effective):
         raise ConfigError("config file not found: %s" % effective)
     try:
