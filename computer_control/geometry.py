@@ -99,7 +99,8 @@ class Surface:
         )
 
     def clamp_point(self, mx: float, my: float) -> Tuple[int, int]:
-        return self._clamp_model(mx, my)
+        cx, cy = self._clamp_model(mx, my)
+        return (int(round(cx)), int(round(cy)))
 
     def _clamp_model(self, mx: float, my: float) -> Tuple[float, float]:
         return (

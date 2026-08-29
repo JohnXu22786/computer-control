@@ -113,14 +113,17 @@ def _modifier_family(name: str) -> frozenset:
 
 
 def _contains_match(value, needle: str) -> bool:
-    """'contains' matching that also understands modifier aliases, so a rule
-    written for 'win' catches lwin/rwin/super/meta."""
-    if needle in value:
+    """'contains' matching that also understands modifier aliases and is
+    case-insensitive, so a rule written for 'win' catches lwin/rwin/super/meta
+    and uppercase/lowercase variations."""
+    v_str = str(value)
+    n_str = str(needle)
+    if n_str.lower() in v_str.lower():
         return True
-    family = _modifier_family(needle)
+    family = _modifier_family(n_str)
     if not family:
         return False
-    return bool(family & _modifier_family(value))
+    return bool(family & _modifier_family(v_str))
 
 
 def _matches_argument(rule, value) -> bool:
