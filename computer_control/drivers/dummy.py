@@ -158,6 +158,36 @@ class NullDriver(BaseDriver):
         self._record(kind="a11y_input", node_id=node_id, text=text)
         return {"node_id": node_id, "method_used": "value", "chars": len(text)}
 
+    # ------------------------------------------------------------- hotkey & info
+
+    def desktop_info(self) -> dict:
+        return {
+            "platform": self.platform_name,
+            "virtual_screen": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+            "dpi_mode": "per_monitor_v2",
+            "capture_backend": "synthetic",
+        }
+
+    def hotkey_probe(self, key_names: list) -> bool:
+        with self._lock:
+            held = getattr(self, "_held_keys", None)
+            if held:
+                return set(key_names).issubset(held)
+        return False
+
+    def simulate_hotkey_down(self, key_names: list) -> None:
+        with self._lock:
+            self._held_keys = set(key_names)
+
+    def simulate_hotkey_up(self) -> None:
+        with self._lock:
+            self._held_keys = set()
+
+    def close(self) -> None:
+        with self._lock:
+            self._nodes.clear()
+            self._held_keys = set()
+
     # -------------------------------------------------------------- helpers
 
     def _make_fake_tree(self):

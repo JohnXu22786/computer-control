@@ -121,9 +121,15 @@ class UiaBridge:
                 if budget["remaining"] <= 0:
                     budget["truncated"] = True
                     return None
+                role = _control_role(mod, _prop(element, getattr(mod, "UIA_ControlTypePropertyId", None)))
+                name_raw = str(_prop(element, getattr(mod, "UIA_NamePropertyId", None), "") or "").strip()
+                if not name_raw:
+                    name_raw = str(_prop(element, getattr(mod, "UIA_LocalizedControlTypePropertyId", None), "") or "").strip()
+                if not name_raw:
+                    name_raw = str(_prop(element, getattr(mod, "UIA_HelpTextPropertyId", None), "") or "").strip()
                 node = build_node(
-                    role=_control_role(mod, _prop(element, mod.UIA_ControlTypePropertyId)),
-                    name=str(_prop(element, mod.UIA_NamePropertyId, "") or ""),
+                    role=role,
+                    name=name_raw or role,
                 )
                 rect = _bounding_rect(element)
                 if rect is not None and options.get("include_rects", True):
