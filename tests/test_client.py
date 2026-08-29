@@ -193,6 +193,12 @@ class TestHttpClient(unittest.TestCase):
             collector.stop()
             client.close()
 
+    def test_http_client_close_terminates_sse_thread(self):
+        client = HttpClient("http://127.0.0.1:%d" % self.port, timeout=5)
+        self.assertTrue(client._sse_thread.is_alive())
+        client.close()
+        self.assertFalse(client._sse_thread.is_alive())
+
 
 if __name__ == "__main__":
     unittest.main()

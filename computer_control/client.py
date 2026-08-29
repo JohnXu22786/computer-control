@@ -153,6 +153,8 @@ class HttpClient(_BaseClient):
     def __init__(self, base_url: str = "http://127.0.0.1:8765", timeout: float = 120.0):
         super().__init__(timeout)
         self._base_url = base_url.rstrip("/")
+        self._stop_event = threading.Event()
+        self._sse_response = None
         self._sse_thread = threading.Thread(target=self._sse_loop, daemon=True)
         self._sse_thread.start()
 
@@ -173,8 +175,9 @@ class HttpClient(_BaseClient):
     def _sse_loop(self) -> None:
         try:
             with urllib.request.urlopen(self._base_url + "/events", timeout=None) as resp:
+                self._sse_response = resp
                 buffer = b""
-                while True:
+                while not self._stop_event.is_set():
                     chunk = resp.read(1)
                     if not chunk:
                         break
@@ -184,6 +187,8 @@ class HttpClient(_BaseClient):
                         buffer = b""
         except Exception:
             pass
+        finally:
+            self._sse_response = None
 
     def _dispatch_sse(self, chunk: bytes) -> None:
         for block in chunk.decode("utf-8", errors="replace").split("\n\n"):
@@ -194,3 +199,15 @@ class HttpClient(_BaseClient):
                     except ValueError:
                         pass
                     break
+
+    def close(self) -> None:
+        self._stop_event.set()
+        resp = self._sse_response
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
+        thread = self._sse_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
