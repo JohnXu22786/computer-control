@@ -66,6 +66,10 @@ class TestSurface(unittest.TestCase):
         s = Surface.from_physical(1920, 0, 0, 3840, 2160)
         self.assertEqual(s.clamp_point(-5, 5000), (0, 1079))
         self.assertEqual(s.clamp_point(2000, 300), (1919, 300))
+        pt = s.clamp_point(10.4, 20.6)
+        self.assertEqual(pt, (10, 21))
+        self.assertIsInstance(pt[0], int)
+        self.assertIsInstance(pt[1], int)
 
     def test_clamped_physical_conversion(self):
         s = Surface.from_physical(1920, 0, 0, 3840, 2160)

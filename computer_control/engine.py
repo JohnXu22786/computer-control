@@ -87,7 +87,7 @@ class Engine:
         pending = self._gate.pending_confirmation()
         if pending is None:
             return
-        plan = [("run", item["tool"], item["arguments"]) for item in (args.get("items") or [])]
+        plan, _, _ = self._build_batch_plan(args.get("items") or [])
         pending.payload = {
             "items": plan,
             "continue_on_error": bool(args.get("continue_on_error")),
@@ -323,20 +323,14 @@ class Engine:
         return self.run_batch(args["items"], continue_on_error=bool(args.get("continue_on_error")),
                               gap_ms=args.get("gap_ms"))
 
-    def run_batch(self, items: List[dict], continue_on_error: bool = False,
-                  gap_ms: Optional[int] = None) -> ResultDict:
-        """Execute a list of {tool, arguments} items.
-
-        Two phases: a pre-scan validates and gates every item (per-item
-        failures become per-item error results, nothing runs yet), then the
-        batch either waits for one confirmation (if any item is high-risk) or
-        executes sequentially. Runtime failures after that are governed by
-        ``continue_on_error``.
-        """
-        gap_ms = gap_ms if gap_ms is not None else self._get_cfg().runtime.batch_gap_ms
-
+    def _build_batch_plan(self, items: List[dict]):
         plan = []
-        confirm = None
+        highest_risk = None
+        confirm_reason = None
+        risk_ranks = {"benign": 0, "moderate": 1, "high": 2}
+        threshold_rank = risk_ranks.get(self._get_cfg().safety.confirm_threshold, 2)
+        max_rank = -1
+
         for item in items:
             tool = item.get("tool", "")
             spec = act.get_spec(tool)
@@ -350,30 +344,59 @@ class Engine:
                     "invalid_arguments", "item %r: %s" % (tool, "; ".join(exc.issues)),
                     tool="batch.execute", data={"issues": exc.issues})))
                 continue
-            verdict = self._gate.evaluate(tool, args)
-            if verdict.decision == "confirm":
-                confirm = verdict
-                plan.append(("run", tool, args))  # the confirming item runs after approval too
-                break  # the whole batch waits; nothing has run yet
+
+            verdict = self._gate.evaluate_allow_only(tool, args)
             if verdict.decision != "allow":
                 plan.append(("error", self._verdict_failure(verdict, tool)))
-            else:
-                plan.append(("run", tool, args))
+                continue
 
-        if confirm is not None:
-            pending = self._gate.pending_confirmation()
-            if pending is not None:
-                pending.payload = {
-                    "items": plan,
-                    "continue_on_error": continue_on_error,
-                    "gap_ms": gap_ms,
-                }
-            return self._ok({
-                "status": "awaiting_confirmation",
-                "request_id": confirm.data["request_id"],
-                "risk": confirm.risk,
-                "reason": confirm.data.get("reason", ""),
-            }, tool="batch.execute")
+            plan.append(("run", tool, args))
+            risk = self._gate.risk_for(tool, args)
+            rank = risk_ranks.get(risk, 0)
+            if rank > max_rank:
+                max_rank = rank
+            if rank >= threshold_rank:
+                if highest_risk is None or rank > risk_ranks.get(highest_risk, 0):
+                    highest_risk = risk
+                    confirm_reason = "batch item %s has risk %s >= confirm threshold %s" % (
+                        tool, risk, self._get_cfg().safety.confirm_threshold
+                    )
+
+        return plan, highest_risk, confirm_reason
+
+    def run_batch(self, items: List[dict], continue_on_error: bool = False,
+                  gap_ms: Optional[int] = None) -> ResultDict:
+        """Execute a list of {tool, arguments} items.
+
+        Two phases: a pre-scan validates and gates every item (per-item
+        failures become per-item error results, nothing runs yet), then the
+        batch either waits for one confirmation (if any item is high-risk) or
+        executes sequentially. Runtime failures after that are governed by
+        ``continue_on_error``.
+        """
+        gap_ms = gap_ms if gap_ms is not None else self._get_cfg().runtime.batch_gap_ms
+        plan, needs_confirm_risk, confirm_reason = self._build_batch_plan(items)
+
+        if needs_confirm_risk is not None:
+            verdict = self._gate.evaluate("batch.execute", {
+                "items": items, "continue_on_error": continue_on_error, "gap_ms": gap_ms
+            })
+            if verdict.decision == "confirm":
+                pending = self._gate.pending_confirmation()
+                if pending is not None:
+                    pending.payload = {
+                        "items": plan,
+                        "continue_on_error": continue_on_error,
+                        "gap_ms": gap_ms,
+                    }
+                return self._ok({
+                    "status": "awaiting_confirmation",
+                    "request_id": verdict.data["request_id"],
+                    "risk": verdict.risk,
+                    "reason": verdict.data.get("reason", ""),
+                }, tool="batch.execute")
+            if verdict.decision != "allow":
+                return self._verdict_failure(verdict, "batch.execute")
 
         return self._run_batch_payload({"items": plan, "continue_on_error": continue_on_error, "gap_ms": gap_ms})
 

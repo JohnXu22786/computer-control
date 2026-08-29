@@ -7,6 +7,10 @@ All notable changes are tracked here. Format loosely follows
 
 ### Fixed
 
+- Fixed batch execution plan integrity where actions occurring after a confirming item were dropped from the batch payload upon approval.
+- Fixed `_stash_batch_payload` to pre-scan, validate, and apply defaults across all batch items.
+- Fixed `Surface.clamp_point` return type to return integer coordinates matching the contract.
+- Fixed safety policy rule matching for `contains` to be case-insensitive for keys and string argument matching.
 - Per-call timeouts now honor `runtime.max_wait_ms` instead of a hardcoded
   300s floor, so a configured small budget actually fails fast.
 - Client request ids are unique across client instances; two clients sharing

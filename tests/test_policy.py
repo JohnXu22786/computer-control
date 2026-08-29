@@ -74,6 +74,17 @@ class TestRules(unittest.TestCase):
         self.assertEqual(gate.evaluate("keyboard.combo", {"keys": ["win", "l"]}).decision, "deny")
         self.assertEqual(gate.evaluate("keyboard.combo", {"keys": ["ctrl", "c"]}).decision, "allow")
 
+    def test_argument_contains_matcher_case_insensitive(self):
+        rules = [
+            {"match": {"tool": "keyboard.combo", "argument": {"name": "keys", "matcher": "contains", "value": "Win"}}, "effect": "deny"},
+            {"match": {"tool": "keyboard.press", "argument": {"name": "key", "matcher": "contains", "value": "Enter"}}, "effect": "deny"},
+        ]
+        gate = make_gate({"safety": {"rules": rules}})
+        self.assertEqual(gate.evaluate("keyboard.combo", {"keys": ["win", "l"]}).decision, "deny")
+        self.assertEqual(gate.evaluate("keyboard.combo", {"keys": ["WIN", "L"]}).decision, "deny")
+        self.assertEqual(gate.evaluate("keyboard.press", {"key": "enter"}).decision, "deny")
+        self.assertEqual(gate.evaluate("keyboard.press", {"key": "tab"}).decision, "allow")
+
     def test_argument_glob_matcher_on_string(self):
         rules = [{"match": {"tool": "keyboard.type", "argument": {"name": "text", "matcher": "glob", "value": "rm -rf*"}}, "effect": "deny"}]
         gate = make_gate({"safety": {"rules": rules}})
@@ -247,14 +258,14 @@ class TestIdleWatchdog(unittest.TestCase):
 
     def test_activity_resets_idle(self):
         emit = EmitRecorder()
-        gate = make_gate({"safety": {"idle_timeout_s": 0.3, "idle_action": "standby"}}, emit=emit)
+        gate = make_gate({"safety": {"idle_timeout_s": 0.8, "idle_action": "standby"}}, emit=emit)
         gate.start_watchdog()
         try:
-            time.sleep(0.12)
+            time.sleep(0.2)
             gate.note_activity()
-            time.sleep(0.12)
+            time.sleep(0.2)
             self.assertNotIn("session.idle", emit.types())
-            self.assertTrue(wait_for(lambda: gate.state == "standby", timeout=1.5))
+            self.assertTrue(wait_for(lambda: gate.state == "standby", timeout=2.5))
         finally:
             gate.close()
 

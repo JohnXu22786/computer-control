@@ -260,6 +260,57 @@ class TestBatch(unittest.TestCase):
         self.assertEqual(len(combos), 1)
         self.assertIn("batch.finished", emit_types(engine))
 
+    def test_batch_confirmation_preserves_subsequent_items(self):
+        engine, driver, gate, _, _ = make_engine({"safety": {"confirm_threshold": "moderate"}})
+        r = engine.run_tool("batch.execute", {
+            "items": [
+                {"tool": "wait.pause", "arguments": {"ms": 1}},
+                {"tool": "keyboard.combo", "arguments": {"keys": ["win", "r"]}},
+                {"tool": "pointer.move", "arguments": {"x": 500, "y": 300}},
+            ],
+        })
+        self.assertEqual(r["result"]["status"], "awaiting_confirmation")
+        rid = r["result"]["request_id"]
+        gate.resolve(rid, approve=True)
+        combos = [e for e in driver.log() if e["kind"] == "combo"]
+        self.assertEqual(len(combos), 1)
+        moves = [e for e in driver.log() if e["kind"] == "move"]
+        self.assertEqual(len(moves), 1)
+        self.assertEqual(moves[0]["position"], (1000.0, 600.0))
+
+    def test_batch_with_invalid_subsequent_item_and_continue_on_error(self):
+        engine, driver, gate, _, _ = make_engine({"safety": {"confirm_threshold": "moderate"}})
+        r = engine.run_tool("batch.execute", {
+            "items": [
+                {"tool": "keyboard.combo", "arguments": {"keys": ["win", "r"]}},
+                {"tool": "unknown.tool.name", "arguments": {}},
+                {"tool": "pointer.move", "arguments": {"x": 100, "y": 100}},
+            ],
+            "continue_on_error": True,
+        })
+        self.assertEqual(r["result"]["status"], "awaiting_confirmation")
+        rid = r["result"]["request_id"]
+        gate.resolve(rid, approve=True)
+        combos = [e for e in driver.log() if e["kind"] == "combo"]
+        moves = [e for e in driver.log() if e["kind"] == "move"]
+        self.assertEqual(len(combos), 1)
+        self.assertEqual(len(moves), 1)
+
+    def test_direct_run_batch_confirmation_preserves_all_items(self):
+        engine, driver, gate, _, _ = make_engine({"safety": {"confirm_threshold": "moderate"}})
+        r = engine.run_batch([
+            {"tool": "wait.pause", "arguments": {"ms": 1}},
+            {"tool": "keyboard.combo", "arguments": {"keys": ["win", "r"]}},
+            {"tool": "pointer.move", "arguments": {"x": 500, "y": 300}},
+        ])
+        self.assertEqual(r["result"]["status"], "awaiting_confirmation")
+        rid = r["result"]["request_id"]
+        gate.resolve(rid, approve=True)
+        combos = [e for e in driver.log() if e["kind"] == "combo"]
+        self.assertEqual(len(combos), 1)
+        moves = [e for e in driver.log() if e["kind"] == "move"]
+        self.assertEqual(len(moves), 1)
+
     def test_batch_validation_error(self):
         engine, _, _, _, _ = make_engine()
         r = engine.run_tool("batch.execute", {"items": []})
