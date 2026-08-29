@@ -334,5 +334,38 @@ class TestStoppedState(unittest.TestCase):
         self.assertTrue(r["ok"])
 
 
+class TestEngineBoundaryArguments(unittest.TestCase):
+    def test_pointer_drag_sanitizes_steps_and_hold(self):
+        engine, driver, _, _, _ = make_engine()
+        r = engine.run_tool("pointer.drag", {
+            "from": {"x": 10, "y": 10},
+            "to": {"x": 100, "y": 100},
+            "steps": 1,
+            "hold_ms": 0,
+        })
+        self.assertTrue(r["ok"], r)
+        drags = [e for e in driver.log() if e["kind"] == "drag"]
+        self.assertEqual(len(drags), 1)
+        self.assertEqual(drags[0]["steps"], 1)
+
+    def test_pointer_click_sanitizes_times_and_hold(self):
+        engine, driver, _, _, _ = make_engine()
+        r = engine.run_tool("pointer.click", {
+            "x": 50, "y": 50, "button": "left", "times": 1, "hold_ms": 0,
+        })
+        self.assertTrue(r["ok"], r)
+        clicks = [e for e in driver.log() if e["kind"] == "click"]
+        self.assertEqual(len(clicks), 1)
+        self.assertEqual(clicks[0]["times"], 1)
+
+    def test_keyboard_type_sanitizes_interval(self):
+        engine, driver, _, _, _ = make_engine()
+        r = engine.run_tool("keyboard.type", {"text": "hello", "interval_ms": 0})
+        self.assertTrue(r["ok"], r)
+        types = [e for e in driver.log() if e["kind"] == "type"]
+        self.assertEqual(len(types), 1)
+        self.assertEqual(types[0]["interval_ms"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

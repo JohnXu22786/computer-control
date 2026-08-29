@@ -189,33 +189,38 @@ class Engine:
 
     def _do_pointer_move(self, args: dict) -> ResultDict:
         x, y = self._surface.to_physical(args["x"], args["y"])
-        self._driver.pointer_move(x, y, steps=args.get("steps") or 1)
+        steps = max(1, int(args.get("steps") or 1))
+        self._driver.pointer_move(x, y, steps=steps)
         return self._ok({"position": {"x": args["x"], "y": args["y"]}}, tool="pointer.move")
 
     def _do_pointer_click(self, args: dict) -> ResultDict:
         position = None
-        if args.get("x") is not None:
+        if args.get("x") is not None and args.get("y") is not None:
             x, y = self._surface.to_physical(args["x"], args["y"])
             self._driver.pointer_move(x, y, steps=1)
             position = {"x": args["x"], "y": args["y"]}
-        self._driver.pointer_click(args["button"], args["times"], hold_ms=args.get("hold_ms") or 0)
-        return self._ok({"button": args["button"], "times": args["times"], "position": position},
+        times = max(1, int(args.get("times") or 1))
+        hold_ms = max(0, int(args.get("hold_ms") or 0))
+        self._driver.pointer_click(args["button"], times, hold_ms=hold_ms)
+        return self._ok({"button": args["button"], "times": times, "position": position},
                         tool="pointer.click")
 
     def _do_pointer_drag(self, args: dict) -> ResultDict:
         fx, fy = self._surface.to_physical(args["from"]["x"], args["from"]["y"])
         tx, ty = self._surface.to_physical(args["to"]["x"], args["to"]["y"])
+        steps = max(1, int(args.get("steps") or 24))
+        hold_ms = max(0, int(args.get("hold_ms") or 0))
         self._driver.pointer_drag(fx, fy, tx, ty, args["button"],
-                                  steps=args.get("steps") or 24, hold_ms=args.get("hold_ms") or 0)
+                                  steps=steps, hold_ms=hold_ms)
         return self._ok({"from": {"x": args["from"]["x"], "y": args["from"]["y"]},
                          "to": {"x": args["to"]["x"], "y": args["to"]["y"]}},
                         tool="pointer.drag")
 
     def _do_pointer_scroll(self, args: dict) -> ResultDict:
-        if args.get("x") is not None:
+        if args.get("x") is not None and args.get("y") is not None:
             x, y = self._surface.to_physical(args["x"], args["y"])
             self._driver.pointer_move(x, y, steps=1)
-        self._driver.pointer_scroll(args["axis"], args["amount"])
+        self._driver.pointer_scroll(args["axis"], float(args["amount"]))
         return self._ok({"axis": args["axis"], "amount": args["amount"]}, tool="pointer.scroll")
 
     # keyboard --------------------------------------------------------------
@@ -229,7 +234,8 @@ class Engine:
         return self._ok({"keys": args["keys"]}, tool="keyboard.combo")
 
     def _do_keyboard_type(self, args: dict) -> ResultDict:
-        self._driver.key_type(args["text"], interval_ms=args.get("interval_ms") or 0)
+        interval_ms = max(0, int(args.get("interval_ms") or 0))
+        self._driver.key_type(args["text"], interval_ms=interval_ms)
         if args.get("submit"):
             self._driver.key_press("enter")
         return self._ok({"chars": len(args["text"]), "submit": bool(args.get("submit"))},
