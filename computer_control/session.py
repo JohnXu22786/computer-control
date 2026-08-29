@@ -137,7 +137,8 @@ class Session:
         info = getattr(driver, "desktop_info", lambda: None)()
         if info and info.get("virtual_screen"):
             vs = info["virtual_screen"]
-            return Surface.from_physical(cfg.capture.default_width, vs["x"], vs["y"], vs["width"], vs["height"])
+            if vs.get("width", 0) > 0 and vs.get("height", 0) > 0:
+                return Surface.from_physical(cfg.capture.default_width, vs["x"], vs["y"], vs["width"], vs["height"])
         return Surface.from_physical(cfg.capture.default_width, 0, 0, cfg.capture.default_width,
                                      int(cfg.capture.default_width * 9 / 16))
 
@@ -170,14 +171,16 @@ class Session:
             holder["result"] = _error("safety_stopped", "session stopped before the action ran")
             outcome.set()
         worker = self._worker
+        in_flight_note = None
         if worker is not None and worker is not threading.current_thread():
             worker.join(timeout=30.0)
             if worker.is_alive():
-                self._emit("session.stopped", {"note": "in-flight action still running"})
+                in_flight_note = "in-flight action still running"
         if engine is not None:
             engine.close()
         self._hide_indicator_if_any()
-        self._emit("session.stopped", {})
+        payload = {"note": in_flight_note} if in_flight_note else {}
+        self._emit("session.stopped", payload)
         return {"ok": True, "result": {"state": "idle"}, "error": None, "meta": {}}
 
     # ------------------------------------------------------------- config

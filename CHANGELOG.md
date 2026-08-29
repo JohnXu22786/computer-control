@@ -7,6 +7,10 @@ All notable changes are tracked here. Format loosely follows
 
 ### Fixed
 
+- Fall back to standard surface geometry when driver virtual screen metrics report non-positive dimensions.
+- Deduplicated `session.stopped` event emission so exactly one event is emitted on session shutdown.
+- Handled `None` argument dictionaries safely in `risk_for` without raising `AttributeError`.
+- Validated key name types in `parse_key_full` before normalization to raise `UnknownKeyError` consistently.
 - Handled HTTP SSE client disconnections gracefully across replay, event broadcast, and keepalives without uncaught socket exceptions.
 - Implemented `HttpClient.close()` to stop background SSE reader threads and terminate HTTP connections cleanly.
 - Expanded `is_modifier` and `MODIFIER_NAMES` in `keys.py` to recognize all modifier aliases (`lctrl`, `rctrl`, `lalt`, `ralt`, `lshift`, `rshift`, `lwin`, `rwin`, `super`, `meta`).

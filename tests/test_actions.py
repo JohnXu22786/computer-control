@@ -139,6 +139,11 @@ class TestRisk(unittest.TestCase):
             "high",
         )
 
+    def test_risk_for_none_arguments(self):
+        self.assertEqual(risk_for("keyboard.combo", None), "moderate")
+        self.assertEqual(risk_for("screen.capture", None), "benign")
+        self.assertEqual(risk_for("batch.execute", None), "benign")
+
 
 class TestGetSpec(unittest.TestCase):
     def test_get_spec_unknown(self):
