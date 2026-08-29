@@ -306,14 +306,50 @@ class TestFraming(unittest.TestCase):
         response = json.loads(writer.buffer.decode("utf-8").strip())
         self.assertEqual(response["error"]["code"], -32601)
 
+    def test_non_object_json_lines_handled_gracefully(self):
+        router = Router(lambda: Session(emit=lambda t, p=None: None, driver_factory=lambda cfg: NullDriver(enable_a11y=True)))
+        reader = FakeReader([b"123\n", b"[1, 2, 3]\n", b'"just a string"\n'])
+        writer = FakeWriter()
+        serve_stdio(router, reader, writer)
+        lines = [json.loads(line) for line in writer.buffer.decode("utf-8").strip().splitlines()]
+        self.assertEqual(len(lines), 3)
+        for resp in lines:
+            self.assertEqual(resp["error"]["code"], -32600)
+            self.assertIsNone(resp["id"])
+
+    def test_invalid_jsonrpc_version_preserves_id(self):
+        router = Router(lambda: Session(emit=lambda t, p=None: None, driver_factory=lambda cfg: NullDriver(enable_a11y=True)))
+        reader = FakeReader([b'{"jsonrpc":"1.0","id":5,"method":"system.status"}\n'])
+        writer = FakeWriter()
+        serve_stdio(router, reader, writer)
+        response = json.loads(writer.buffer.decode("utf-8").strip())
+        self.assertEqual(response["error"]["code"], -32600)
+        self.assertEqual(response["id"], 5)
+
 
 class TestProtocolHelpers(unittest.TestCase):
+    def test_standard_error_codes(self):
+        from computer_control.protocol import (
+            PARSE_ERROR,
+            INVALID_REQUEST,
+            METHOD_NOT_FOUND,
+            INVALID_PARAMS,
+            INTERNAL_ERROR,
+            SERVER_ERROR,
+        )
+        self.assertEqual(PARSE_ERROR, -32700)
+        self.assertEqual(INVALID_REQUEST, -32600)
+        self.assertEqual(METHOD_NOT_FOUND, -32601)
+        self.assertEqual(INVALID_PARAMS, -32602)
+        self.assertEqual(INTERNAL_ERROR, -32603)
+        self.assertEqual(SERVER_ERROR, -32000)
+
     def test_protocol_error_shapes(self):
         err = ProtocolError("boom", data={"x": 1})
-        self.assertEqual(err.code, -32000)
+        self.assertEqual(err.code, -32603)
         self.assertEqual(err.message, "boom")
         self.assertEqual(err.data, {"x": 1})
-        self.assertEqual(err.as_jsonrpc(), {"code": -32000, "message": "boom", "data": {"x": 1}})
+        self.assertEqual(err.as_jsonrpc(), {"code": -32603, "message": "boom", "data": {"x": 1}})
 
 
 if __name__ == "__main__":

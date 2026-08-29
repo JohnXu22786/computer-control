@@ -130,20 +130,15 @@ def serve_stdio(router: Router, stdin, stdout, stop_event: Optional[threading.Ev
             request = load_request(line)
             response = router.handle(request)
         except ProtocolError as exc:
-            # Parse/invalid-request failures: the id is unknown, so reply
-            # with a null id (JSON-RPC spec) - but only when we could not
-            # parse; notifications are never answered.
+            # Parse/invalid-request failures: respond with the request's id if available,
+            # or null id per JSON-RPC 2.0 specification.
             request_id = _extract_id(line)
-            if request_id is None and line.strip().startswith(b"{"):
-                response = {"jsonrpc": "2.0", "id": None, "error": exc.as_jsonrpc()}
-            elif request_id is not None:
-                response = {"jsonrpc": "2.0", "id": request_id, "error": exc.as_jsonrpc()}
+            response = {"jsonrpc": "2.0", "id": request_id, "error": exc.as_jsonrpc()}
         except Exception as exc:
             log("unhandled error: %s\n%s" % (exc, _stack()))
             request_id = _extract_id(line)
-            if request_id is not None:
-                response = {"jsonrpc": "2.0", "id": request_id,
-                            "error": {"code": -32000, "message": "internal error: %s" % exc}}
+            response = {"jsonrpc": "2.0", "id": request_id,
+                        "error": {"code": -32603, "message": "internal error: %s" % exc}}
         if response is not None:
             try:
                 stdout.write(json.dumps(response).encode("utf-8") + b"\n")
@@ -156,9 +151,11 @@ def serve_stdio(router: Router, stdin, stdout, stop_event: Optional[threading.Ev
 def _extract_id(line: bytes):
     try:
         request = json.loads(line.decode("utf-8"))
-        return request.get("id")
+        if isinstance(request, dict):
+            return request.get("id")
     except Exception:
-        return None
+        pass
+    return None
 
 
 def _stack() -> str:
@@ -214,7 +211,7 @@ def make_http_server(router: Router, host: str, port: int):
             except Exception as exc:
                 log("http handler error: %s" % exc)
                 response = {"jsonrpc": "2.0", "id": request.get("id"),
-                            "error": {"code": -32000, "message": "internal error: %s" % exc}}
+                            "error": {"code": -32603, "message": "internal error: %s" % exc}}
             if response is None:
                 self.send_response(204)
                 self.send_header("Content-Length", "0")
