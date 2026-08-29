@@ -22,7 +22,11 @@ _ELLIPSIS = "..."
 def build_node(role: str, name: str, rect: Optional[tuple] = None) -> dict:
     """Build a raw node dict. ``rect`` is (left, top, right, bottom).
     The id is assigned by the tree walker."""
-    node = {"role": role, "name": name}
+    role_str = str(role or "custom")
+    name_str = str(name or "")
+    if not name_str.strip():
+        name_str = role_str
+    node = {"role": role_str, "name": name_str}
     if rect is not None:
         node["rect"] = [int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])]
     return node

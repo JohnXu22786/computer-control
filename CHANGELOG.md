@@ -11,6 +11,8 @@ All notable changes are tracked here. Format loosely follows
 
 ### Fixed
 
+- Added semantic name fallback in accessibility tree node building to fall back to element role, localized control type, or help text when element name is empty or whitespace.
+- Implemented `desktop_info`, simulated hotkey probing, and resource cleanup on `NullDriver` for complete test environment parity.
 - Hardened `Rect.clamp_point` for rectangles with fractional dimensions smaller than 1.0 unit.
 - Ensured `Rect.from_bbox` produces float attributes for consistent arithmetic operations.
 - Fall back to standard surface geometry when driver virtual screen metrics report non-positive dimensions.

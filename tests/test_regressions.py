@@ -609,5 +609,24 @@ class TestCliCommands(unittest.TestCase):
         self.assertIn("events", data)
 
 
+class TestNullDriverCompleteness(unittest.TestCase):
+    def test_desktop_info(self):
+        driver = NullDriver()
+        info = driver.desktop_info()
+        self.assertEqual(info["platform"], "dry-run")
+        self.assertEqual(info["virtual_screen"]["width"], 1920)
+        self.assertEqual(info["virtual_screen"]["height"], 1080)
+
+    def test_hotkey_probe_simulation(self):
+        driver = NullDriver()
+        self.assertFalse(driver.hotkey_probe(["ctrl", "alt", "f12"]))
+        driver.simulate_hotkey_down(["ctrl", "alt", "f12"])
+        self.assertTrue(driver.hotkey_probe(["ctrl", "alt", "f12"]))
+        self.assertTrue(driver.hotkey_probe(["ctrl"]))
+        self.assertFalse(driver.hotkey_probe(["ctrl", "shift"]))
+        driver.simulate_hotkey_up()
+        self.assertFalse(driver.hotkey_probe(["ctrl", "alt", "f12"]))
+
+
 if __name__ == "__main__":
     unittest.main()

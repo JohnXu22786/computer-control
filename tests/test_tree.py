@@ -129,6 +129,14 @@ class TestBuildNode(unittest.TestCase):
         self.assertNotIn("rect", node)
         self.assertNotIn("id", node)  # ids are assigned by the tree walker
 
+    def test_build_node_empty_name_falls_back_to_role(self):
+        node = build_node("button", "")
+        self.assertEqual(node["name"], "button")
+        node = build_node("edit", "   ")
+        self.assertEqual(node["name"], "edit")
+        node = build_node("menu", None)
+        self.assertEqual(node["name"], "menu")
+
 
 if __name__ == "__main__":
     unittest.main()
