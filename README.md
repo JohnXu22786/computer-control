@@ -2,7 +2,7 @@
 
 # computer-control — Desktop Control Plugin (for dsh)
 
-Lets an agent operate the computer desktop directly: screenshot observation, mouse/keyboard injection, semantic actions via the accessibility tree (semantics first, pixel-coordinate fallback), with built-in safety guards — emergency stop, allow/deny rules, confirmation flow and idle standby.
+Lets an agent operate the computer desktop directly: screenshot observation, mouse/keyboard injection, semantic actions via the accessibility tree (semantics first, pixel-coordinate fallback), with built-in safety guards — emergency stop, authorization profiles, allow/deny rules, confirmation flow and idle standby.
 
 The plugin is self-contained and loadable by dsh directly: it declares tools and events via `manifest.json`, speaks **line-delimited JSON-RPC 2.0** (stdio) as its transport protocol, and `python -m computer_control serve` is the entry point.
 
@@ -23,6 +23,7 @@ The plugin is self-contained and loadable by dsh directly: it declares tools and
 Safety guards (see the "Safety" section):
 
 - **Emergency stop**: triple trigger — global hotkey (default `Ctrl+Alt+F12`, configurable), protocol command, panic file; a STOP banner shows in the screen corner
+- **Authorization profiles**: `read_only` / `limited` / `full` / `revoked` narrow which tools may pass the gate — an axis orthogonal to the operational state, fixed at session start so an agent cannot widen its own permissions in-band
 - **Allow/deny rules**: matched by tool name and arguments, deny always wins; whitelist mode switchable
 - **Confirmation flow**: high-risk actions (including chords with `win` or `ctrl+alt`) wait for human approval, auto-denied on timeout
 - **Idle standby**: no activity past a threshold puts the session into standby, rejecting all actions until resumed
@@ -160,6 +161,8 @@ The model sees a **canvas**, not the raw screen: screenshots are scaled to an as
 See [`docs/configuration.md`](docs/configuration.md#safety) and the points below:
 
 - **Emergency stop (triple)**: default global hotkey `Ctrl+Alt+F12` (configurable via `safety.emergency_hotkey`, set empty to disable); protocol method `control.panic`; panic file (`safety.panic_file`, presence stops everything). After a panic all actions return `safety_stopped`; `session.resume` or pressing the hotkey again restores operation. A red STOP banner shows in the screen corner while engaged (`safety.visual_indicator`).
+- **Authorization profiles** (`safety.auth_profile`, default `full`): `read_only` admits only observation tools (`screen.capture`, `a11y.snapshot`); `limited` additionally refuses every `keyboard.*` action; `full` narrows nothing; `revoked` raises the emergency stop above. Refused actions return `not_authorized`. **This is an axis orthogonal to the operational state**, not another state: it shrinks the set of tools that clears the gate while `ready` / `standby` / `stopped` keep their meaning, so a `read_only` session still reports `state: "ready"`. `revoked` deliberately reuses the emergency stop instead of adding a fifth state. The check sits ahead of the allow/deny rule scan and is shared by plain and batch-internal actions, so batching cannot bypass a profile.
+  Fixed at `session.start`: `safety.auth_profile` is in the immutable set, so `session.configure` rejects it with `invalid_config` and an agent cannot widen its own profile over the in-band RPC channel. **Limitation: there is no out-of-band human re-grant channel yet** — changing the profile mid-session requires restarting the session. Runtime escalation UI is intentionally left out of this change.
 - **Allow/deny rules** (`safety.rules`): `{match: {tool: "keyboard.*", argument: {name, matcher, value}}, effect: "deny"}`; deny rules always win over allow rules. `safety.default_rule: "deny"` switches to whitelist mode (anything not explicitly allowed is denied). Rules can be adjusted at runtime via `session.configure`.
 - **Confirmation flow**: `safety.confirm_threshold` (default `high`) decides which risk levels need human approval; `safety.confirm_timeout_s` (default 30s) auto-denies on timeout. Approved actions execute normally and emit `action.finished`.
 - **Idle standby**: enabled when `safety.idle_timeout_s` > 0; after no activity for the timeout the session enters standby (emits `session.idle`), `session.resume` restores it; `idle_action: "none"` only emits the event without pausing.

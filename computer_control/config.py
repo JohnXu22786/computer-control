@@ -30,6 +30,7 @@ IDLE_ACTIONS = ("standby", "none")
 CAPTURE_BACKENDS = ("auto", "pillow", "mss")
 RULE_MATCHERS = ("equals", "glob", "contains")
 RULE_EFFECTS = ("allow", "deny")
+AUTH_PROFILES = ("read_only", "limited", "full", "revoked")
 
 CONFIG_SECTIONS = ("platform", "capture", "safety", "a11y", "runtime")
 
@@ -121,6 +122,7 @@ class SafetyConfig:
     visual_indicator: bool = True
     default_rule: str = "allow"
     rules: List[RuleConfig] = field(default_factory=list)
+    auth_profile: str = "full"
 
 
 @dataclass
@@ -168,6 +170,7 @@ class Config:
                 "visual_indicator": self.safety.visual_indicator,
                 "default_rule": self.safety.default_rule,
                 "rules": [r.as_dict() for r in self.safety.rules],
+                "auth_profile": self.safety.auth_profile,
             },
             "a11y": {
                 "default_level": self.a11y.default_level,
@@ -264,7 +267,8 @@ def from_dict(data: dict) -> Config:
     if not isinstance(safety, dict):
         raise ConfigError("safety must be an object")
     unknown = set(safety) - {"emergency_hotkey", "confirm_threshold", "confirm_timeout_s", "idle_timeout_s",
-                             "idle_action", "panic_file", "visual_indicator", "default_rule", "rules"}
+                             "idle_action", "panic_file", "visual_indicator", "default_rule", "rules",
+                             "auth_profile"}
     if unknown:
         raise ConfigError("unknown safety option(s): %s" % ", ".join(sorted(unknown)))
     if "emergency_hotkey" in safety:
@@ -293,6 +297,8 @@ def from_dict(data: dict) -> Config:
     if "rules" in safety:
         _expect_type(safety["rules"], list, "a list", "safety", "rules")
         cfg.safety.rules = [_parse_rule(raw, i) for i, raw in enumerate(safety["rules"])]
+    if "auth_profile" in safety:
+        cfg.safety.auth_profile = _expect_enum(safety["auth_profile"], AUTH_PROFILES, "safety", "auth_profile")
 
     # a11y
     a11y = data.get("a11y", {})

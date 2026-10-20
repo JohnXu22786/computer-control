@@ -69,6 +69,8 @@ class Engine:
             return self._fail("safety_standby", verdict.reason, tool=tool)
         if verdict.decision == "busy":
             return self._fail("busy", verdict.reason, tool=tool)
+        if verdict.decision == "not_authorized":
+            return self._fail("not_authorized", verdict.reason, tool=tool)
         if verdict.decision == "confirm":
             if tool == "batch.execute":
                 self._stash_batch_payload(args)
@@ -440,6 +442,7 @@ class Engine:
             "stopped": ("safety_stopped", None),
             "standby": ("safety_standby", None),
             "busy": ("busy", None),
+            "not_authorized": ("not_authorized", {"auth_profile": verdict.data.get("auth_profile")}),
         }
         code, data = mapping.get(verdict.decision, ("policy_denied", None))
         error = {"code": code, "message": verdict.reason}

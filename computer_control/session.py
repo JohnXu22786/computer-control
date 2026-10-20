@@ -12,6 +12,11 @@ State machine (visible via system.status / events):
     ready --idle timeout--> standby
     stopped/standby --session.resume--> ready
     any --session.stop--> idle
+
+Authorization profiles (safety.auth_profile: read_only / limited / full /
+revoked) are a separate axis from the states above - they narrow which tools
+clear the gate, and are fixed at session.start. 'revoked' raises the existing
+emergency stop rather than adding a state.
 """
 
 from __future__ import annotations
@@ -33,9 +38,11 @@ from computer_control.policy import SafetyGate
 _CONFIGURABLE_KEYS = ("capture", "safety", "a11y", "runtime")
 
 # Fields that are fixed at session.start and rejected by session.configure.
+# auth_profile belongs here because session.configure is reachable in-band: a
+# widening patch would let the agent grant itself a larger profile.
 _IMMUTABLE_FIELDS = {
     "capture": {"backend"},
-    "safety": {"emergency_hotkey", "panic_file", "visual_indicator"},
+    "safety": {"emergency_hotkey", "panic_file", "visual_indicator", "auth_profile"},
 }
 
 

@@ -8,6 +8,15 @@ All notable changes are tracked here. Format loosely follows
 ### Added
 
 - Added `--version` / `-V` CLI flag to inspect package version from the command line.
+- Added runtime authorization profiles (`safety.auth_profile`: `read_only` /
+  `limited` / `full` / `revoked`) as an axis orthogonal to the operational
+  state. The check runs ahead of the allow/deny rule scan, on the path shared
+  by plain and batch-internal actions, so batching cannot bypass a profile;
+  refused actions return a new `not_authorized` decision, reported with the
+  active profile in `error.data.auth_profile`. `revoked` reuses the emergency
+  stop instead of adding a fifth state. `auth_profile` is immutable after
+  `session.start`, so a session cannot widen its own profile through
+  `session.configure`; a human re-grant channel is not implemented yet.
 
 ### Fixed
 

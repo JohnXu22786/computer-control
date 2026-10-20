@@ -210,12 +210,28 @@ class TestImmutableConfig(unittest.TestCase):
         for patch in ({"safety": {"emergency_hotkey": "ctrl+alt+q"}},
                       {"safety": {"panic_file": "C:\\tmp\\panic"}},
                       {"safety": {"visual_indicator": False}},
+                      {"safety": {"auth_profile": "full"}},
                       {"capture": {"backend": "pillow"}}):
             from computer_control.session import SessionError
 
             with self.assertRaises(SessionError) as ctx:
                 self.session.configure(patch)
             self.assertEqual(ctx.exception.code, "invalid_config", patch)
+
+    def test_auth_profile_survives_unrelated_configure(self):
+        # session.configure round-trips the whole config; a profile that is
+        # dropped on the way back through as_dict/from_dict would silently
+        # widen the agent's own permissions.
+        session = Session(emit=lambda t, p=None: None,
+                          driver_factory=lambda cfg: NullDriver(enable_a11y=True),
+                          base_config={"safety": {"auth_profile": "read_only"}})
+        try:
+            session.start({})
+            self.assertTrue(session.configure({"safety": {"confirm_threshold": "moderate"}})["ok"])
+            r = session.call("pointer.click", {"button": "left"})
+            self.assertEqual((r.get("error") or {}).get("code"), "not_authorized")
+        finally:
+            session.stop()
 
     def test_rules_still_configurable(self):
         result = self.session.configure({"safety": {"rules": [{"match": {"tool": "pointer.click"}, "effect": "deny"}]}})

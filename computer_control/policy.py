@@ -2,9 +2,12 @@
 
 It enforces, in order:
   1. operational state  - stopped (emergency stop) / standby (idle) block everything
-  2. allow/deny rules   - an explicit deny always wins over allows; allowlist
+  2. authorization profile - read_only / limited / full / revoked shrink which
+                          tools may run; orthogonal to the state above, and set
+                          at session.start only
+  3. allow/deny rules   - an explicit deny always wins over allows; allowlist
                           mode when the default rule is deny
-  3. risk confirmation  - actions at or above the configured risk threshold
+  4. risk confirmation  - actions at or above the configured risk threshold
                           wait for a human approval before they may run
 
 It also owns the emergency-stop machinery (hotkey polling, panic file,
@@ -31,6 +34,17 @@ _STATE_STANDBY = "standby"
 
 _RISK_ORDER = {"benign": 0, "moderate": 1, "high": 2}
 
+_GRANT_READ_ONLY = "read_only"
+_GRANT_LIMITED = "limited"
+_GRANT_REVOKED = "revoked"
+
+_NOT_AUTHORIZED = "not_authorized"
+
+# Observation-only surface for the read_only profile. 'system.status' is a
+# protocol method rather than a gated tool; it stays listed so the profile
+# reads as the intended capability set.
+_READ_ONLY_TOOLS = frozenset({"screen.capture", "system.status", "a11y.snapshot"})
+
 # Aliases that refer to the same physical key must not be able to dodge risk
 # classification or rule matching.
 _WIN_LIKE = frozenset({"win", "lwin", "rwin", "super", "meta"})
@@ -52,7 +66,7 @@ class PolicyError(Exception):
 class GateVerdict:
     """Result of evaluating one action against the gate."""
 
-    decision: str  # allow | deny | confirm | stopped | standby | busy
+    decision: str  # allow | deny | confirm | stopped | standby | busy | not_authorized
     reason: str = ""
     risk: str = RISK_LEVELS[0]
     data: dict = field(default_factory=dict)
@@ -154,6 +168,8 @@ class SafetyGate:
         self._hotkey_probe = driver_hotkey_probe
         self._lock = threading.RLock()
         self._state = _STATE_READY
+        self._grant = cfg.auth_profile
+        self._last_rule = None
         self._panic_sources = set()
         self._pending: Optional[PendingConfirmation] = None
         self._expired_ids = {}  # request_id -> expiry timestamp, for error reporting
@@ -344,6 +360,12 @@ class SafetyGate:
     def risk_for(self, tool: str, arguments: dict) -> str:
         return risk_for(tool, arguments)
 
+    def _grant_deny_reason(self) -> str:
+        if self._grant == _GRANT_REVOKED:
+            return "authorization profile 'revoked' is active; emergency stop raised, user must re-grant"
+        return ("action not permitted by authorization profile '%s'; requires the user to grant a wider profile"
+                % self._grant)
+
     def evaluate(self, tool: str, arguments: dict) -> GateVerdict:
         """Run an action through the gate. Never raises for policy outcomes."""
         with self._lock:
@@ -357,6 +379,9 @@ class SafetyGate:
 
             risk = self.risk_for(tool, arguments)
             rule_verdict = self._apply_rules_locked(tool, arguments)
+            if rule_verdict == _NOT_AUTHORIZED:
+                return GateVerdict(_NOT_AUTHORIZED, self._grant_deny_reason(), risk=risk,
+                                   data={"auth_profile": self._grant})
             if rule_verdict == "deny":
                 return GateVerdict("deny", "blocked by a deny rule", risk=risk, data={"rule": self._last_rule})
             if rule_verdict == "not_allowed":
@@ -372,7 +397,8 @@ class SafetyGate:
     def evaluate_allow_only(self, tool: str, arguments: dict) -> GateVerdict:
         """Gate an action for execution inside an already-approved context
         (batch payload). Confirmation is implicitly granted; deny rules,
-        operational state and the panic file still apply."""
+        authorization profiles, operational state and the panic file still
+        apply."""
         with self._lock:
             self._purge_expired_locked()
             if self._state == _STATE_STOPPED or self._panic_active_locked():
@@ -380,6 +406,9 @@ class SafetyGate:
             if self._state == _STATE_STANDBY:
                 return GateVerdict("standby", "session is in idle standby; call session.resume", risk=self.risk_for(tool, arguments))
             rule_verdict = self._apply_rules_locked(tool, arguments)
+            if rule_verdict == _NOT_AUTHORIZED:
+                return GateVerdict(_NOT_AUTHORIZED, self._grant_deny_reason(), risk=self.risk_for(tool, arguments),
+                                   data={"auth_profile": self._grant})
             if rule_verdict == "deny":
                 return GateVerdict("deny", "blocked by a deny rule", risk=self.risk_for(tool, arguments),
                                    data={"rule": self._last_rule})
@@ -388,14 +417,38 @@ class SafetyGate:
                                    risk=self.risk_for(tool, arguments))
             return GateVerdict("allow", risk=self.risk_for(tool, arguments))
 
+    def _check_grant_locked(self, tool: str) -> Optional[str]:
+        """Authorization profile check - the orthogonal axis to the operational
+        state. Returns _NOT_AUTHORIZED or None.
+
+        Lives outside the state machine so that shrinking what may run never
+        changes how the session feels about acting. 'revoked' does not invent a
+        fifth state: it raises the existing emergency stop, so every later
+        evaluation is refused by the stopped path already in place.
+        """
+        if self._grant == _GRANT_REVOKED:
+            self.trigger_panic(source="revoked")
+            return _NOT_AUTHORIZED
+        if self._grant == _GRANT_READ_ONLY and tool not in _READ_ONLY_TOOLS:
+            return _NOT_AUTHORIZED
+        if self._grant == _GRANT_LIMITED and tool.startswith("keyboard."):
+            return _NOT_AUTHORIZED
+        return None
+
     def _apply_rules_locked(self, tool: str, arguments: dict):
-        """Returns 'allow' | 'deny' | 'not_allowed'.
+        """Returns 'allow' | 'deny' | 'not_allowed' | 'not_authorized'.
+
+        Every action - plain and batch-internal alike - arrives through here,
+        so the authorization check is placed ahead of the rule scan.
 
         All rules are scanned: the first matching allow and the first matching
         deny are remembered, and an explicit deny always wins regardless of
         rule order. An 'allow' effect never exempts from the confirmation
         threshold (that is a separate safety layer).
         """
+        granted = self._check_grant_locked(tool)
+        if granted is not None:
+            return granted
         first_allow = None
         first_deny = None
         for rule in self._cfg.rules:
@@ -513,6 +566,7 @@ class SafetyGate:
     def reconfigure(self, cfg: SafetyConfig) -> None:
         with self._lock:
             self._cfg = cfg
+            self._grant = cfg.auth_profile
             self._hotkey_names = _parse_hotkey_spec(cfg.emergency_hotkey)
 
 
