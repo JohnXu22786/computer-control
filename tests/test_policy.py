@@ -241,6 +241,67 @@ class TestEmergencyStop(unittest.TestCase):
         self.assertEqual(gate.state, "ready")
 
 
+class TestAuthorizationProfiles(unittest.TestCase):
+    """Authorization profiles are an axis orthogonal to the operational state:
+    they narrow which tools clear the gate, and never introduce a state."""
+
+    def test_read_only_blocks_writes(self):
+        gate = make_gate({"safety": {"auth_profile": "read_only"}})
+        for tool in ("screen.capture", "a11y.snapshot"):
+            self.assertEqual(gate.evaluate(tool, {}).decision, "allow", tool)
+        for tool, args in (("pointer.click", {}), ("keyboard.type", {"text": "hi"}),
+                          ("a11y.activate", {}), ("batch.execute", {"items": []})):
+            v = gate.evaluate(tool, args)
+            self.assertEqual(v.decision, "not_authorized", tool)
+            self.assertEqual(v.data.get("auth_profile"), "read_only", tool)
+        self.assertEqual(gate.state, "ready")
+
+    def test_limited_blocks_keyboard(self):
+        gate = make_gate({"safety": {"auth_profile": "limited"}})
+        for tool in ("keyboard.type", "keyboard.press", "keyboard.combo"):
+            self.assertEqual(gate.evaluate(tool, {}).decision, "not_authorized", tool)
+        self.assertEqual(gate.evaluate("pointer.click", {}).decision, "allow")
+        self.assertEqual(gate.evaluate("screen.capture", {}).decision, "allow")
+        self.assertEqual(gate.state, "ready")
+
+    def test_full_profile_is_unrestricted(self):
+        gate = make_gate({"safety": {"auth_profile": "full"}})
+        for tool in ("screen.capture", "pointer.click", "keyboard.type", "wait.pause"):
+            self.assertEqual(gate.evaluate(tool, {}).decision, "allow", tool)
+
+    def test_batch_inner_actions_are_gated(self):
+        # evaluate_allow_only is the batch-internal path; confirmation is
+        # already granted there, so authorization must still refuse.
+        gate = make_gate({"safety": {"auth_profile": "read_only"}})
+        self.assertEqual(gate.evaluate_allow_only("pointer.click", {}).decision, "not_authorized")
+        self.assertEqual(gate.evaluate_allow_only("keyboard.type", {}).decision, "not_authorized")
+        self.assertEqual(gate.evaluate_allow_only("screen.capture", {}).decision, "allow")
+
+    def test_revoked_triggers_panic(self):
+        emit = EmitRecorder()
+        gate = make_gate({"safety": {"auth_profile": "revoked"}}, emit=emit)
+        first = gate.evaluate("screen.capture", {})
+        self.assertEqual(first.decision, "not_authorized")
+        self.assertEqual(gate.state, "stopped")
+        self.assertIn("safety.panic_triggered", emit.types())
+        # revoked reuses the emergency stop: later calls are refused by the
+        # stopped path, and even the batch-internal path cannot get through.
+        self.assertEqual(gate.evaluate("screen.capture", {}).decision, "stopped")
+        self.assertEqual(gate.evaluate_allow_only("screen.capture", {}).decision, "stopped")
+
+    def test_grant_allowlist_does_not_exempt_from_deny_rules(self):
+        gate = make_gate({"safety": {"auth_profile": "read_only",
+                                     "rules": [{"match": {"tool": "screen.capture"}, "effect": "deny"}]}})
+        self.assertEqual(gate.evaluate("screen.capture", {}).decision, "deny")
+
+    def test_grant_check_precedes_rule_scan(self):
+        # The grant sits ahead of the rules, so a tool the profile already
+        # refuses reports not_authorized even when a deny rule would match.
+        gate = make_gate({"safety": {"auth_profile": "read_only",
+                                     "rules": [{"match": {"tool": "pointer.*"}, "effect": "deny"}]}})
+        self.assertEqual(gate.evaluate("pointer.click", {}).decision, "not_authorized")
+
+
 class TestIdleWatchdog(unittest.TestCase):
     def test_standby_after_idle(self):
         emit = EmitRecorder()

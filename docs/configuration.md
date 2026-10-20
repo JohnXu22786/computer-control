@@ -32,6 +32,7 @@
 | `idle_action` | `standby` | 空闲后行为：`standby`（停摆拒动作）/ `none`（仅发事件） |
 | `default_rule` | `allow` | 默认放行 / `deny`（白名单模式） |
 | `rules` | `[]` | 规则列表（见下） |
+| `auth_profile` | `full` | 授权模式：`read_only`（仅观察类工具 `screen.capture` / `a11y.snapshot`）/ `limited`（放行指针等，额外拒绝所有 `keyboard.*`）/ `full`（不收窄）/ `revoked`（收回，直接触发既有急停）。被拒动作返回 `not_authorized`。**独立于操作状态的正交轴**：只收窄可通过安全门的工具集，不改变 `ready`/`standby`/`stopped`，因此只读会话的 `state` 仍是 `ready`。**不可运行时修改** |
 
 ### 规则格式
 
@@ -49,6 +50,7 @@
   - `matcher: "contains"`：字符串包含，或列表元素包含；修饰键的别名视为同一族（如规则写 `"win"` 可命中 `lwin/rwin/super/meta`，`"ctrl"` 可命中 `lctrl/rctrl`，`"alt"` 可命中 `lalt/ralt`）。**针对修饰键的规则请使用 contains。**
 - 求值：**显式 deny 永远优先**（无论规则顺序）；`default_rule: "deny"` 时未命中任何 allow 也拒绝。
 - 规则不豁免确认流——确认阈值是独立的安全层，刻意不可用规则绕过。
+- 授权模式（`auth_profile`）在规则扫描**之前**求值：已被模式拒绝的动作返回 `not_authorized`，即使存在会命中的 deny 规则；而 `read_only` 白名单内的动作仍继续受 deny 规则管辖。批量内层动作走同一求值点，无法借批量绕过授权模式。
 
 ### 推荐起始配置
 
@@ -86,4 +88,6 @@
 
 ## 运行时不可修改的字段
 
-`platform.*`、`safety.emergency_hotkey`、`safety.panic_file`、`safety.visual_indicator`、`capture.backend`——这些在 `session.start` 时固化；`session.configure` 传这些字段会返回 `invalid_config`。
+`platform.*`、`safety.emergency_hotkey`、`safety.panic_file`、`safety.visual_indicator`、`safety.auth_profile`、`capture.backend`——这些在 `session.start` 时固化；`session.configure` 传这些字段会返回 `invalid_config`。
+
+`safety.auth_profile` 列在此处是刻意的安全约束而非疏漏：`session.configure` 是带内可达的调用面，若允许运行时改宽授权模式，agent 就能自行提权。变更模式只能靠重启会话（或改配置文件）完成；**运行时人工提权通道目前尚未实现**，见 README「安全」一节。
