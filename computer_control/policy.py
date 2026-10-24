@@ -3,8 +3,8 @@
 It enforces, in order:
   1. operational state  - stopped (emergency stop) / standby (idle) block everything
   2. authorization profile - read_only / limited / full / revoked shrink which
-                          tools may run; orthogonal to the state above, and set
-                          at session.start only
+                          tools may run; orthogonal to the state above - a live
+                          session may narrow it in-band but never widen it
   3. allow/deny rules   - an explicit deny always wins over allows; allowlist
                           mode when the default rule is deny
   4. risk confirmation  - actions at or above the configured risk threshold
@@ -362,7 +362,8 @@ class SafetyGate:
 
     def _grant_deny_reason(self) -> str:
         if self._grant == _GRANT_REVOKED:
-            return "authorization profile 'revoked' is active; emergency stop raised, user must re-grant"
+            return ("authorization profile 'revoked' is active; observation tools still run, "
+                    "but only the host can grant a wider profile")
         return ("action not permitted by authorization profile '%s'; requires the user to grant a wider profile"
                 % self._grant)
 
@@ -419,17 +420,15 @@ class SafetyGate:
 
     def _check_grant_locked(self, tool: str) -> Optional[str]:
         """Authorization profile check - the orthogonal axis to the operational
-        state. Returns _NOT_AUTHORIZED or None.
+        state. Returns _NOT_AUTHORIZED or None, and never touches _state.
 
-        Lives outside the state machine so that shrinking what may run never
-        changes how the session feels about acting. 'revoked' does not invent a
-        fifth state: it raises the existing emergency stop, so every later
-        evaluation is refused by the stopped path already in place.
+        'revoked' and 'read_only' share the observation floor: withdrawing
+        authority must not blind the human deciding whether to hand it back.
+        revoked bites harder on the way in (a pending confirmation is cancelled,
+        see set_grant) and is the only rung an agent cannot climb back out of
+        in-band.
         """
-        if self._grant == _GRANT_REVOKED:
-            self.trigger_panic(source="revoked")
-            return _NOT_AUTHORIZED
-        if self._grant == _GRANT_READ_ONLY and tool not in _READ_ONLY_TOOLS:
+        if self._grant in (_GRANT_REVOKED, _GRANT_READ_ONLY) and tool not in _READ_ONLY_TOOLS:
             return _NOT_AUTHORIZED
         if self._grant == _GRANT_LIMITED and tool.startswith("keyboard."):
             return _NOT_AUTHORIZED
@@ -563,11 +562,26 @@ class SafetyGate:
 
     # ------------------------------------------------------------- lifecycle
 
+    def set_grant(self, profile: str) -> None:
+        """Change the authorization profile on a live gate.
+
+        Entering 'revoked' cancels a pending confirmation: authority was
+        withdrawn, so an approval collected earlier must not run. The
+        operational state is left alone - revoked is a capability rung, not a
+        state, so a revoked session still reports 'ready'.
+        """
+        with self._lock:
+            if profile == self._grant:
+                return
+            self._grant = profile
+            if profile == _GRANT_REVOKED:
+                self._cancel_pending_locked("cancelled by authorization revoke")
+
     def reconfigure(self, cfg: SafetyConfig) -> None:
         with self._lock:
             self._cfg = cfg
-            self._grant = cfg.auth_profile
             self._hotkey_names = _parse_hotkey_spec(cfg.emergency_hotkey)
+            self.set_grant(cfg.auth_profile)
 
 
 def _parse_hotkey_spec(spec: str) -> List[str]:

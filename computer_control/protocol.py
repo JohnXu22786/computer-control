@@ -105,6 +105,9 @@ class Router:
         self._factory = session_factory or make_default_session
         self._session_cache = None
         self._session_lock = threading.Lock()
+        # Host-only capabilities (Session.grant_profile) are deliberately absent
+        # from this table: whatever is listed here is reachable in-band by the
+        # agent, and no in-band route may be able to widen authorization.
         self._handlers = {
             "session.start": self._session_start,
             "session.stop": self._session_stop,

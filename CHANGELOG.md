@@ -8,15 +8,25 @@ All notable changes are tracked here. Format loosely follows
 ### Added
 
 - Added `--version` / `-V` CLI flag to inspect package version from the command line.
-- Added runtime authorization profiles (`safety.auth_profile`: `read_only` /
-  `limited` / `full` / `revoked`) as an axis orthogonal to the operational
+- Added runtime authorization profiles (`safety.auth_profile`: `full` /
+  `limited` / `read_only` / `revoked`) as an axis orthogonal to the operational
   state. The check runs ahead of the allow/deny rule scan, on the path shared
   by plain and batch-internal actions, so batching cannot bypass a profile;
   refused actions return a new `not_authorized` decision, reported with the
-  active profile in `error.data.auth_profile`. `revoked` reuses the emergency
-  stop instead of adding a fifth state. `auth_profile` is immutable after
-  `session.start`, so a session cannot widen its own profile through
-  `session.configure`; a human re-grant channel is not implemented yet.
+  active profile in `error.data.auth_profile`. `revoked` is the bottom rung of
+  that ladder rather than a fifth state or another emergency stop: it keeps
+  the observation tools (`screen.capture`, `a11y.snapshot`) running, cancels a
+  pending confirmation the moment it is entered, and leaves `state` at `ready`.
+- Added the grant channel for changing a profile on a live session.
+  `session.configure` is the agent-reachable path and may only narrow
+  `safety.auth_profile` or hold it; any widening, including one step up out of
+  `revoked`, is rejected with `invalid_config`. `session.start` is capped the
+  same way — the profile in the host's own config file bounds a restarted
+  session, so stop-then-restart is not an escape hatch, and a runtime grant
+  does not survive a restart. The host moves profiles in any direction with
+  `Session.grant_profile(new_profile, actor="host")`, a direct Python call
+  deliberately absent from the JSON-RPC handler table. Each change emits a
+  `safety.grant_changed` event.
 
 ### Fixed
 

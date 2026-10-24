@@ -32,7 +32,19 @@ RULE_MATCHERS = ("equals", "glob", "contains")
 RULE_EFFECTS = ("allow", "deny")
 AUTH_PROFILES = ("read_only", "limited", "full", "revoked")
 
+# Capability ladder, narrowest first. Tells a narrowing patch from a widening
+# one: the in-band (agent-reachable) configure path may only walk down it.
+AUTH_PROFILE_RANK = {"revoked": 0, "read_only": 1, "limited": 2, "full": 3}
+
 CONFIG_SECTIONS = ("platform", "capture", "safety", "a11y", "runtime")
+
+
+def authorization_widens(current: str, requested: str) -> bool:
+    """True when ``requested`` grants more than ``current``. An unknown profile
+    counts as widening so a bad value can never slip through as a narrowing."""
+    if current not in AUTH_PROFILE_RANK or requested not in AUTH_PROFILE_RANK:
+        return True
+    return AUTH_PROFILE_RANK[requested] > AUTH_PROFILE_RANK[current]
 
 
 class ConfigError(ValueError):

@@ -277,17 +277,59 @@ class TestAuthorizationProfiles(unittest.TestCase):
         self.assertEqual(gate.evaluate_allow_only("keyboard.type", {}).decision, "not_authorized")
         self.assertEqual(gate.evaluate_allow_only("screen.capture", {}).decision, "allow")
 
-    def test_revoked_triggers_panic(self):
+    def test_revoked_keeps_observation_and_stays_ready(self):
         emit = EmitRecorder()
         gate = make_gate({"safety": {"auth_profile": "revoked"}}, emit=emit)
-        first = gate.evaluate("screen.capture", {})
-        self.assertEqual(first.decision, "not_authorized")
-        self.assertEqual(gate.state, "stopped")
-        self.assertIn("safety.panic_triggered", emit.types())
-        # revoked reuses the emergency stop: later calls are refused by the
-        # stopped path, and even the batch-internal path cannot get through.
-        self.assertEqual(gate.evaluate("screen.capture", {}).decision, "stopped")
-        self.assertEqual(gate.evaluate_allow_only("screen.capture", {}).decision, "stopped")
+        for tool in ("screen.capture", "a11y.snapshot"):
+            self.assertEqual(gate.evaluate(tool, {}).decision, "allow", tool)
+        for tool in ("pointer.click", "keyboard.type", "wait.pause", "batch.execute"):
+            v = gate.evaluate(tool, {})
+            self.assertEqual(v.decision, "not_authorized", tool)
+            self.assertEqual(v.data.get("auth_profile"), "revoked", tool)
+        # revoked is a rung on the capability ladder, not an emergency stop.
+        self.assertEqual(gate.state, "ready")
+        self.assertNotIn("safety.panic_triggered", emit.types())
+        # the batch-internal path sees the same floor.
+        self.assertEqual(gate.evaluate_allow_only("screen.capture", {}).decision, "allow")
+        self.assertEqual(gate.evaluate_allow_only("pointer.click", {}).decision, "not_authorized")
+
+    def test_entering_revoked_cancels_pending_confirmation(self):
+        # An approval collected before the withdrawal must not run afterwards.
+        emit = EmitRecorder()
+        gate = make_gate({"safety": {"auth_profile": "full", "confirm_threshold": "high"}}, emit=emit)
+        v = gate.evaluate("keyboard.combo", {"keys": ["win", "r"]})
+        self.assertEqual(v.decision, "confirm")
+        rid = v.data["request_id"]
+        gate.set_grant("revoked")
+        self.assertIsNone(gate.pending_confirmation())
+        self.assertIn("safety.confirmation_resolved", emit.types())
+        self.assertEqual(gate.state, "ready")
+        with self.assertRaises(PolicyError) as ctx:
+            gate.resolve(rid, approve=True)
+        self.assertEqual(ctx.exception.code, "confirmation_not_found")
+
+    def test_reconfigure_to_revoked_cancels_pending_confirmation(self):
+        # reconfigure is the funnel both channels go through.
+        gate = make_gate({"safety": {"auth_profile": "limited", "confirm_threshold": "moderate"}})
+        v = gate.evaluate("pointer.click", {})
+        self.assertEqual(v.decision, "confirm")
+        rid = v.data["request_id"]
+        gate.reconfigure(from_dict({"safety": {"auth_profile": "revoked",
+                                               "confirm_threshold": "moderate"}}).safety)
+        self.assertIsNone(gate.pending_confirmation())
+        self.assertEqual(gate.state, "ready")
+        with self.assertRaises(PolicyError):
+            gate.resolve(rid, approve=True)
+
+    def test_revoked_creates_no_new_confirmations(self):
+        # The grant sits ahead of the confirmation flow, so revoking cannot be
+        # undone by a later action re-arming a pending request.
+        emit = EmitRecorder()
+        gate = make_gate({"safety": {"auth_profile": "revoked", "confirm_threshold": "high"}}, emit=emit)
+        v = gate.evaluate("keyboard.combo", {"keys": ["win", "r"]})
+        self.assertEqual(v.decision, "not_authorized")
+        self.assertNotIn("safety.confirmation_requested", emit.types())
+        self.assertEqual(gate.state, "ready")
 
     def test_grant_allowlist_does_not_exempt_from_deny_rules(self):
         gate = make_gate({"safety": {"auth_profile": "read_only",

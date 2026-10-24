@@ -15,8 +15,9 @@ State machine (visible via system.status / events):
 
 Authorization profiles (safety.auth_profile: read_only / limited / full /
 revoked) are a separate axis from the states above - they narrow which tools
-clear the gate, and are fixed at session.start. 'revoked' raises the existing
-emergency stop rather than adding a state.
+clear the gate. session.configure is reachable in-band, so it may only narrow
+(or hold) the profile; widening requires the host to call Session.grant_profile
+directly, which is deliberately not a routed RPC method.
 """
 
 from __future__ import annotations
@@ -27,7 +28,8 @@ import time
 from typing import Callable, List, Optional
 
 from computer_control import actions as act
-from computer_control.config import Config, apply_overrides, default_config, from_dict
+from computer_control.config import (AUTH_PROFILES, Config, apply_overrides, authorization_widens,
+                                     default_config, from_dict)
 from computer_control.drivers import create_driver
 from computer_control.drivers.base import BaseDriver
 from computer_control.engine import Engine
@@ -38,11 +40,12 @@ from computer_control.policy import SafetyGate
 _CONFIGURABLE_KEYS = ("capture", "safety", "a11y", "runtime")
 
 # Fields that are fixed at session.start and rejected by session.configure.
-# auth_profile belongs here because session.configure is reachable in-band: a
-# widening patch would let the agent grant itself a larger profile.
+# auth_profile is deliberately NOT here: the host has to be able to move it at
+# runtime. The anti-escalation guarantee is monotonicity instead, enforced on
+# the in-band path only (see Session._configure).
 _IMMUTABLE_FIELDS = {
     "capture": {"backend"},
-    "safety": {"emergency_hotkey", "panic_file", "visual_indicator", "auth_profile"},
+    "safety": {"emergency_hotkey", "panic_file", "visual_indicator"},
 }
 
 
@@ -101,6 +104,16 @@ class Session:
                 raise SessionError("already_started", "session is already running; call session.stop first")
             try:
                 base = from_dict(self._base_config) if self._base_config else default_config()
+            except ValueError as exc:
+                raise SessionError("invalid_config", "configuration rejected: %s" % exc)
+            # session.start is in-band too, so stop+start must not be a way back
+            # up the ladder: the host's own config file is the cap for a session
+            # the agent (re)starts. A runtime grant does not survive a restart.
+            start_safety = (raw_config or {}).get("safety")
+            requested = start_safety.get("auth_profile") if isinstance(start_safety, dict) else None
+            if requested is not None:
+                self._reject_widening(base.safety.auth_profile, requested, "session.start")
+            try:
                 cfg = apply_overrides(base, raw_config or {})
             except ValueError as exc:
                 raise SessionError("invalid_config", "configuration rejected: %s" % exc)
@@ -193,6 +206,41 @@ class Session:
     # ------------------------------------------------------------- config
 
     def configure(self, patch: dict) -> dict:
+        """In-band configuration - the path the agent can reach over JSON-RPC.
+
+        A safety.auth_profile patch here is accepted only when it narrows (or
+        holds) the profile; widening needs Session.grant_profile.
+        """
+        return self._configure(patch, allow_widen=False, actor="agent")
+
+    def grant_profile(self, new_profile: str, actor: str = "host") -> dict:
+        """Out-of-band change of the authorization profile, made by the host;
+        any direction is allowed.
+
+        Deliberately not routable: nothing in the protocol handler table may
+        widen a profile, because being routable means the agent can reach it.
+        ``actor`` only labels the audit event - the permission to widen comes
+        from this being a direct Python call the host makes itself.
+        """
+        if new_profile not in AUTH_PROFILES:
+            raise SessionError("invalid_config",
+                               "auth_profile must be one of %s, got %r"
+                               % ("/".join(AUTH_PROFILES), new_profile))
+        return self._configure({"safety": {"auth_profile": new_profile}},
+                               allow_widen=True, actor=actor)
+
+    def _reject_widening(self, current: str, requested: str, channel: str) -> None:
+        if requested not in AUTH_PROFILES:
+            raise SessionError("invalid_config",
+                               "auth_profile must be one of %s, got %r"
+                               % ("/".join(AUTH_PROFILES), requested))
+        if authorization_widens(current, requested):
+            raise SessionError("invalid_config",
+                               "%s may only narrow authorization; %s -> %s is a widening, "
+                               "the host must call Session.grant_profile"
+                               % (channel, current, requested))
+
+    def _configure(self, patch: dict, allow_widen: bool, actor: str) -> dict:
         with self._lock:
             if self._gate is None:
                 raise SessionError("not_started", "no session is running")
@@ -210,14 +258,24 @@ class Session:
             if immutable:
                 raise SessionError("invalid_config",
                                    "immutable after session.start: %s" % ", ".join(sorted(immutable)))
+            safety_patch = (patch or {}).get("safety")
+            requested = safety_patch.get("auth_profile") if isinstance(safety_patch, dict) else None
+            before = self._cfg.safety.auth_profile
+            if requested is not None and not allow_widen:
+                self._reject_widening(before, requested, "session.configure")
             try:
                 new_cfg = apply_overrides(self._cfg, patch or {})
             except ValueError as exc:
                 raise SessionError("invalid_config", "configuration rejected: %s" % exc)
             self._cfg = new_cfg
             self._gate.reconfigure(new_cfg.safety)
+            after = new_cfg.safety.auth_profile
             self._emit("session.configured", {"patch": patch or {}})
-            return {"ok": True, "result": {"state": self.state, "applied": patch or {}},
+            if after != before:
+                self._emit("safety.grant_changed", {"from": before, "to": after, "actor": actor,
+                                                   "widened": authorization_widens(before, after)})
+            return {"ok": True, "result": {"state": self.state, "auth_profile": after,
+                                           "applied": patch or {}},
                     "error": None, "meta": {}}
 
     # --------------------------------------------------------------- calls
