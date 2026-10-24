@@ -8,7 +8,7 @@ JSON-RPC 2.0，行分隔（每行一个 JSON 对象），UTF-8。HTTP 传输见�
 | --- | --- | --- |
 | `session.start` | 配置对象（可选） | 启动会话；返回 `{state, surface, capabilities}` |
 | `session.stop` | — | 结束会话，释放驱动与看门狗 |
-| `session.configure` | 可配置子集 | 运行时调整规则/阈值等 |
+| `session.configure` | 可配置子集 | 运行时调整规则/阈值等；`safety.auth_profile` 只允许收窄或维持，任何扩权返回 `invalid_config`（扩权只能由宿主在 Python 层调 `Session.grant_profile`，该方法不进本路由表） |
 | `session.confirm` | `{request_id, approve}` | 批复待确认动作 |
 | `session.resume` | — | 从 stopped/standby 恢复 |
 | `control.panic` | `{on: bool}` | 程序化急停/解除 |

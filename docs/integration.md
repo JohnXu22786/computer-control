@@ -61,6 +61,7 @@ screen.capture (验证结果，必要时重复)
 | `safety.confirmation_resolved` | 已批复 | 关闭确认 UI |
 | `safety.confirmation_expired` | 超时未批（自动拒绝） | 提示已拒绝 |
 | `safety.panic_triggered` / `safety.panic_released` | 急停触发/解除 | 显著提示用户；急停期间禁止再发动作 |
+| `safety.grant_changed` | 授权模式变更（`{from, to, actor, widened}`） | 刷新权限展示；`widened: true` 意味着宿主刚在带外提权，值得记一笔审计日志 |
 
 HTTP 传输下 `GET /events` 提供 SSE 流，会先回放最近 200 条事件再续传（harness 重连不丢上下文）。
 
