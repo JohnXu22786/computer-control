@@ -82,6 +82,7 @@ server → event action.started → event action.finished
 ```
 
 - 批复响应立即返回，被批准的动作在工作线程上与其他动作串行执行；事件顺序为 `confirmation_resolved` → `action.started` → `action.finished`。
+- 批准后、执行前若授权模式被降级/收回，该动作不会执行，而是发出 `action.finished`（`ok:false`、`error_code:not_authorized`）；宿主应据此刷新权限展示并提示用户。
 - 待批期间新动作一律返回 `busy`（先批复再继续）。
 - 超时（`safety.confirm_timeout_s`，默认 30s）自动拒绝并发出 `confirmation_expired`；之后用旧 id 批复返回 `confirmation_expired` 错误。
 - 批量中任一项需要确认 → **整批**等待一次批复，批准后整批执行（含触发确认的那一项）。

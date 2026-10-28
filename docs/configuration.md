@@ -97,6 +97,7 @@
 - `session.configure` 是 agent 可达的调用面，因此这里的 `auth_profile` 补丁只允许沿阶梯 `full → limited → read_only → revoked` 降级或保持不变；任何变宽（如 `read_only → full`，甚至 `revoked → read_only`）返回 `invalid_config`。
 - 提权只能由宿主在 Python 层直接调用 `Session.grant_profile(new_profile, actor="host")`，它可以任意方向变更。该方法**刻意不进 JSON-RPC 路由表**——凡可路由即可被 agent 触达，所以路由表里不存在任何能扩权的入口。`actor` 只是审计事件标签，扩权资格来自「宿主自己发起了这次调用」，不来自参数。
 - `session.start` 同样属于带内，因此 **stop + start 也不是逃生门**：重启时会拿宿主自己的配置文件（`base_config`，即 `--config` / `COMPUTER_CONTROL_CONFIG`）里声明的 `auth_profile` 作为上限，请求比它更宽返回 `invalid_config`。宿主未声明限制时上限即默认值 `full`，此时不受约束。运行时提权**不跨重启保留**，重启后回落到配置文件的上限。
+- 带内降权是**粘性的**：同一 `Session` 实例上，agent 降到过的档位会成为之后所有 `session.start` 的额外上限——重启时即使**不传** `auth_profile`，会话也以该档位（或更低）启动，而不是静默重新加载配置文件里更宽的档位；显式请求比粘性档位更宽同样返回 `invalid_config`。宿主调用 `grant_profile` 后，粘性上限更新为宿主授予的档位。`session.start` 的结果与 `session.started` 事件携带生效的 `auth_profile`，供宿主核对。
 - 每次生效的模式变更都会发出 `safety.grant_changed` 事件（`from` / `to` / `actor` / `widened`）。
-- 进入 `revoked` 会取消当前待确认请求（发 `safety.confirmation_resolved`，`approve=false`），先前收集的批准不会再执行；`revoked` 不触发急停、不改 `state`，观察类工具仍可运行。
+- 降级（含进入 `revoked`）会取消当前待确认请求中**不再被新档位放行**的项（发 `safety.confirmation_resolved`，`approve=false`），先前收集的批准不会再执行；进入 `revoked` 无条件取消待确认请求。此外每个动作在真正执行前都会重新过门（`evaluate_allow_only`），批准后才被降权/收回的动作同样不会执行（发 `action.finished`，`error_code=not_authorized`）。`revoked` 不触发急停、不改 `state`，观察类工具仍可运行。
 - 已知代价：agent 可以自我降权直至 `revoked`，把自身会话锁在只观察档位，需要宿主才能解锁。这是降权，不构成提权。
