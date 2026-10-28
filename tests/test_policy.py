@@ -308,6 +308,55 @@ class TestAuthorizationProfiles(unittest.TestCase):
             gate.resolve(rid, approve=True)
         self.assertEqual(ctx.exception.code, "confirmation_not_found")
 
+    def test_downgrade_cancels_pending_confirmation_the_profile_blocks(self):
+        # A downgrade must cancel a pending confirmation whose tool the new
+        # profile no longer authorizes - not just entering revoked.
+        emit = EmitRecorder()
+        gate = make_gate({"safety": {"auth_profile": "full", "confirm_threshold": "moderate"}}, emit=emit)
+        v = gate.evaluate("pointer.click", {"button": "left"})
+        self.assertEqual(v.decision, "confirm")
+        rid = v.data["request_id"]
+        gate.set_grant("read_only")
+        self.assertIsNone(gate.pending_confirmation())
+        self.assertIn("safety.confirmation_resolved", emit.types())
+        self.assertEqual(gate.state, "ready")
+        with self.assertRaises(PolicyError) as ctx:
+            gate.resolve(rid, approve=True)
+        self.assertEqual(ctx.exception.code, "confirmation_not_found")
+
+    def test_downgrade_to_limited_cancels_pending_keyboard_confirmation(self):
+        emit = EmitRecorder()
+        gate = make_gate({"safety": {"auth_profile": "full", "confirm_threshold": "high"}}, emit=emit)
+        v = gate.evaluate("keyboard.combo", {"keys": ["win", "r"]})
+        self.assertEqual(v.decision, "confirm")
+        rid = v.data["request_id"]
+        gate.set_grant("limited")  # keyboard.* is refused under limited
+        self.assertIsNone(gate.pending_confirmation())
+        with self.assertRaises(PolicyError):
+            gate.resolve(rid, approve=True)
+
+    def test_downgrade_keeps_pending_confirmation_still_allowed(self):
+        emit = EmitRecorder()
+        gate = make_gate({"safety": {"auth_profile": "full", "confirm_threshold": "moderate"}}, emit=emit)
+        v = gate.evaluate("pointer.click", {"button": "left"})
+        self.assertEqual(v.decision, "confirm")
+        rid = v.data["request_id"]
+        gate.set_grant("limited")  # pointer.* stays authorized under limited
+        self.assertIsNotNone(gate.pending_confirmation())
+        self.assertEqual(gate.resolve(rid, approve=True).status, "approved")
+
+    def test_downgrade_keeps_pending_observation_confirmation(self):
+        # An observation tool pending at threshold 'benign' remains approvable
+        # after narrowing to read_only: it sits on the shared observation floor.
+        emit = EmitRecorder()
+        gate = make_gate({"safety": {"auth_profile": "full", "confirm_threshold": "benign"}}, emit=emit)
+        v = gate.evaluate("screen.capture", {})
+        self.assertEqual(v.decision, "confirm")
+        rid = v.data["request_id"]
+        gate.set_grant("read_only")
+        self.assertIsNotNone(gate.pending_confirmation())
+        self.assertEqual(gate.resolve(rid, approve=True).status, "approved")
+
     def test_reconfigure_to_revoked_cancels_pending_confirmation(self):
         # reconfigure is the funnel both channels go through.
         gate = make_gate({"safety": {"auth_profile": "limited", "confirm_threshold": "moderate"}})

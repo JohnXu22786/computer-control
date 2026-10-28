@@ -6,7 +6,7 @@ JSON-RPC 2.0，行分隔（每行一个 JSON 对象），UTF-8。HTTP 传输见�
 
 | 方法 | 参数 | 说明 |
 | --- | --- | --- |
-| `session.start` | 配置对象（可选） | 启动会话；返回 `{state, surface, capabilities}` |
+| `session.start` | 配置对象（可选） | 启动会话；返回 `{state, surface, capabilities, auth_profile}` |
 | `session.stop` | — | 结束会话，释放驱动与看门狗 |
 | `session.configure` | 可配置子集 | 运行时调整规则/阈值等；`safety.auth_profile` 只允许收窄或维持，任何扩权返回 `invalid_config`（扩权只能由宿主在 Python 层调 `Session.grant_profile`，该方法不进本路由表） |
 | `session.confirm` | `{request_id, approve}` | 批复待确认动作 |
@@ -50,6 +50,7 @@ JSON-RPC 2.0，行分隔（每行一个 JSON 对象），UTF-8。HTTP 传输见�
 | `unknown_tool` | 未知工具名 |
 | `invalid_arguments` | 参数校验失败（`data.issues` 列出问题） |
 | `policy_denied` | 命中拒绝规则 / 白名单外（`data.rule`） |
+| `not_authorized` | 授权模式不允许该动作（`data.auth_profile` 为当前档位） |
 | `safety_stopped` | 急停生效中 |
 | `safety_standby` | 空闲待机中 |
 | `busy` | 有待批确认未处理 |

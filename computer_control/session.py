@@ -17,7 +17,10 @@ Authorization profiles (safety.auth_profile: read_only / limited / full /
 revoked) are a separate axis from the states above - they narrow which tools
 clear the gate. session.configure is reachable in-band, so it may only narrow
 (or hold) the profile; widening requires the host to call Session.grant_profile
-directly, which is deliberately not a routed RPC method.
+directly, which is deliberately not a routed RPC method. The monotonicity is
+sticky across restarts: the narrowest profile the in-band channel has reached
+bounds every later session.start on the same Session object, so stop+start
+cannot silently reload the wider profile from the host's config file.
 """
 
 from __future__ import annotations
@@ -83,6 +86,11 @@ class Session:
         self._action_count = 0
         self._frame_counter = 0
         self._stop_requested = threading.Event()
+        # Narrowest authorization profile the in-band channel has ever placed
+        # this Session object at. Survives stop/start so a restart cannot
+        # reload a wider profile from the host's config file; only a host
+        # grant_profile lifts it. None until the first start.
+        self._profile_floor: Optional[str] = None
 
     # ------------------------------------------------------------ lifecycle
 
@@ -108,7 +116,15 @@ class Session:
                 raise SessionError("invalid_config", "configuration rejected: %s" % exc)
             # session.start is in-band too, so stop+start must not be a way back
             # up the ladder: the host's own config file is the cap for a session
-            # the agent (re)starts. A runtime grant does not survive a restart.
+            # the agent (re)starts, and a downgrade the agent made earlier is
+            # sticky - the floor survives restarts, so a start that omits
+            # auth_profile still comes up at the narrowed profile (or below)
+            # instead of silently reloading the wider config-file profile. A
+            # runtime grant does not survive a restart; granting again is the
+            # host's explicit way back up.
+            if self._profile_floor is not None and authorization_widens(self._profile_floor,
+                                                                        base.safety.auth_profile):
+                base.safety.auth_profile = self._profile_floor
             start_safety = (raw_config or {}).get("safety")
             requested = start_safety.get("auth_profile") if isinstance(start_safety, dict) else None
             if requested is not None:
@@ -147,10 +163,14 @@ class Session:
             gate.on_approved = queue_approval
             gate.on_panic_state = self._on_panic_state
             gate.start_watchdog()
+            profile = self._cfg.safety.auth_profile
+            self._profile_floor = profile
             self._emit("session.started", {"state": self.state, "surface": surface.as_dict(),
-                                           "capabilities": driver.capabilities})
+                                           "capabilities": driver.capabilities,
+                                           "auth_profile": profile})
             return {"ok": True, "result": {"state": self.state, "surface": surface.as_dict(),
-                                           "capabilities": driver.capabilities},
+                                           "capabilities": driver.capabilities,
+                                           "auth_profile": profile},
                     "error": None, "meta": {}}
 
     def _read_surface(self, cfg: Config, driver: BaseDriver) -> Surface:
@@ -270,6 +290,11 @@ class Session:
             self._cfg = new_cfg
             self._gate.reconfigure(new_cfg.safety)
             after = new_cfg.safety.auth_profile
+            if after != before:
+                # Every effective profile change re-anchors the sticky floor:
+                # in-band narrowing tightens it, a host grant lifts it to the
+                # level the host explicitly sanctioned.
+                self._profile_floor = after
             self._emit("session.configured", {"patch": patch or {}})
             if after != before:
                 self._emit("safety.grant_changed", {"from": before, "to": after, "actor": actor,

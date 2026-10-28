@@ -30,6 +30,19 @@ All notable changes are tracked here. Format loosely follows
 
 ### Fixed
 
+- Hardened the authorization-profile channel against three review findings:
+  a downgrade is sticky across restarts of the same session object (a
+  `session.start` that omits `auth_profile` comes up at the narrowed profile
+  instead of silently reloading the wider one from the host's config file, and
+  an explicit start profile wider than the floor is rejected), a downgrade
+  cancels a pending confirmation whose tool the new profile no longer
+  authorizes, and every action is re-gated with `evaluate_allow_only` right
+  before execution so an approval collected before a downgrade/revoke cannot
+  run afterwards (the refusal surfaces as `action.finished` with
+  `error_code: not_authorized`). Plain `tools.call` `not_authorized` errors
+  now carry the active profile in `error.data.auth_profile`, matching the
+  batch path and the protocol docs, and `session.start` reports the effective
+  `auth_profile`.
 - Handled URLError, connection timeouts, and malformed JSON responses in `HttpClient` and `_BaseClient`, converting them into typed `ClientError` exceptions.
 - Added manifest validation regression test asserting complete parity between `manifest()` and `manifest.json`.
 - Aligned JSON-RPC 2.0 error codes to standard values (`-32603` for internal errors, `-32000` for server errors).

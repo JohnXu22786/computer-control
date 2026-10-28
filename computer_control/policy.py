@@ -565,8 +565,10 @@ class SafetyGate:
     def set_grant(self, profile: str) -> None:
         """Change the authorization profile on a live gate.
 
-        Entering 'revoked' cancels a pending confirmation: authority was
-        withdrawn, so an approval collected earlier must not run. The
+        A downgrade cancels a pending confirmation whose tool the new profile
+        no longer authorizes: authority was withdrawn, so an approval collected
+        earlier must not run. Entering 'revoked' cancels the pending
+        confirmation unconditionally - it bites harder on the way in. The
         operational state is left alone - revoked is a capability rung, not a
         state, so a revoked session still reports 'ready'.
         """
@@ -576,6 +578,11 @@ class SafetyGate:
             self._grant = profile
             if profile == _GRANT_REVOKED:
                 self._cancel_pending_locked("cancelled by authorization revoke")
+                return
+            pending = self._pending
+            if (pending is not None and pending.status == "pending"
+                    and self._check_grant_locked(pending.tool) is not None):
+                self._cancel_pending_locked("cancelled by authorization downgrade")
 
     def reconfigure(self, cfg: SafetyConfig) -> None:
         with self._lock:

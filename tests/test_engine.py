@@ -111,6 +111,19 @@ class TestErrors(unittest.TestCase):
         self.assertEqual(r["error"]["code"], "policy_denied")
         self.assertIn("rule", r["error"]["data"])
 
+    def test_not_authorized_includes_auth_profile(self):
+        # the plain tools.call path reports the active profile in error.data,
+        # matching the batch path and the protocol docs
+        engine, _, _, _, _ = make_engine({"safety": {"auth_profile": "read_only"}})
+        r = engine.run_tool("pointer.click", {})
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["code"], "not_authorized")
+        self.assertEqual(r["error"]["data"]["auth_profile"], "read_only")
+        engine, _, _, _, _ = make_engine({"safety": {"auth_profile": "revoked"}})
+        r = engine.run_tool("keyboard.type", {"text": "hi"})
+        self.assertEqual(r["error"]["code"], "not_authorized")
+        self.assertEqual(r["error"]["data"]["auth_profile"], "revoked")
+
     def test_a11y_backend_unavailable(self):
         cfg = from_dict({})
         driver = NullDriver(enable_a11y=False)
@@ -185,6 +198,57 @@ class TestConfirmation(unittest.TestCase):
         with self.assertRaises(Exception) as ctx:
             gate.resolve(r["result"]["request_id"], approve=True)
         self.assertEqual(getattr(ctx.exception, "code", None), "confirmation_expired")
+        self.assertEqual([e for e in driver.log() if e["kind"] == "combo"], [])
+
+
+class TestApprovalRace(unittest.TestCase):
+    """An approval collected while an action was still legal must not execute
+    after the authorization profile was narrowed or revoked afterwards."""
+
+    def _captured(self, overrides):
+        engine, driver, gate, emit, _ = make_engine(overrides)
+        approved = []
+        gate.on_approved = approved.append  # capture instead of executing
+        return engine, driver, gate, emit, approved
+
+    def test_approved_action_refused_after_downgrade(self):
+        engine, driver, gate, emit, approved = self._captured(
+            {"safety": {"confirm_threshold": "moderate"}})
+        r = engine.run_tool("keyboard.combo", {"keys": ["win", "r"]})
+        gate.resolve(r["result"]["request_id"], approve=True)
+        gate.set_grant("read_only")  # downgrade lands after the approval
+        engine._on_confirmation_approved(approved[0])
+        self.assertEqual([e for e in driver.log() if e["kind"] == "combo"], [])
+        self.assertNotIn("action.started", emit.types())
+        finished = [p for t, p in emit.dump() if t == "action.finished"]
+        self.assertEqual([p.get("error_code") for p in finished], ["not_authorized"])
+
+    def test_approved_action_refused_after_revoke(self):
+        engine, driver, gate, emit, approved = self._captured(
+            {"safety": {"confirm_threshold": "moderate"}})
+        r = engine.run_tool("keyboard.combo", {"keys": ["win", "r"]})
+        gate.resolve(r["result"]["request_id"], approve=True)
+        gate.set_grant("revoked")  # revoke lands after the approval
+        engine._on_confirmation_approved(approved[0])
+        self.assertEqual([e for e in driver.log() if e["kind"] == "combo"], [])
+        finished = [p for t, p in emit.dump() if t == "action.finished"]
+        self.assertEqual([p.get("error_code") for p in finished], ["not_authorized"])
+
+    def test_approved_batch_item_refused_after_downgrade(self):
+        engine, driver, gate, _, approved = self._captured(
+            {"safety": {"confirm_threshold": "moderate"}})
+        r = engine.run_tool("batch.execute", {
+            "items": [
+                {"tool": "keyboard.combo", "arguments": {"keys": ["win", "r"]}},
+                {"tool": "wait.pause", "arguments": {"ms": 1}},
+            ],
+        })
+        gate.resolve(r["result"]["request_id"], approve=True)
+        gate.set_grant("read_only")
+        result = engine._run_batch_payload(approved[0].payload)
+        items = result["result"]["items"]
+        self.assertEqual(items[0]["error"]["code"], "not_authorized")
+        self.assertEqual(items[0]["error"]["data"]["auth_profile"], "read_only")
         self.assertEqual([e for e in driver.log() if e["kind"] == "combo"], [])
 
 

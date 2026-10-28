@@ -70,7 +70,8 @@ class Engine:
         if verdict.decision == "busy":
             return self._fail("busy", verdict.reason, tool=tool)
         if verdict.decision == "not_authorized":
-            return self._fail("not_authorized", verdict.reason, tool=tool)
+            return self._fail("not_authorized", verdict.reason, tool=tool,
+                              data={"auth_profile": verdict.data.get("auth_profile")})
         if verdict.decision == "confirm":
             if tool == "batch.execute":
                 self._stash_batch_payload(args)
@@ -114,10 +115,27 @@ class Engine:
             payload = pending.payload
             if payload:
                 self._run_batch_payload(payload)
-        else:
-            self._execute(pending.tool, pending.arguments)
+            return
+        result = self._execute(pending.tool, pending.arguments)
+        if not result.get("ok"):
+            # the approval was collected while the action was still legal;
+            # the re-check inside _execute refused it. Surface the refusal on
+            # the event stream so the human knows the approval did not run.
+            self._emit("action.finished", {
+                "tool": pending.tool,
+                "ok": False,
+                "duration_ms": 0,
+                "error_code": (result.get("error") or {}).get("code"),
+            })
 
     def _execute(self, tool: str, args: dict) -> ResultDict:
+        # Every execution - plain, batch-internal, or confirmation-approved -
+        # passes the gate again right here. An approval (or a batch pre-scan)
+        # may have been collected before the host narrowed the authorization
+        # profile; re-evaluating closes that race.
+        verdict = self._gate.evaluate_allow_only(tool, args)
+        if verdict.decision != "allow":
+            return self._verdict_failure(verdict, tool)
         started = time.monotonic()
         self._emit("action.started", {"tool": tool, "arguments": args})
         try:
