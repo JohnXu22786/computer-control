@@ -316,18 +316,21 @@ def _coerce(param: ParamSpec, raw, issues: List[str], tool: str) -> Any:
         if set(raw) != allowed:
             issues.append("%s: expected exactly %s keys" % (param.name, sorted(allowed)))
             return raw
+        valid_numbers = set()
         for key, value in raw.items():
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 issues.append("%s.%s: expected a number" % (param.name, key))
             elif not _isfinite(float(value)):
                 issues.append("%s.%s: expected a finite number" % (param.name, key))
-        if "width" in raw and raw["width"] <= 0:
+            else:
+                valid_numbers.add(key)
+        if "width" in valid_numbers and raw["width"] <= 0:
             issues.append("%s.width must be positive" % param.name)
-        if "height" in raw and raw["height"] <= 0:
+        if "height" in valid_numbers and raw["height"] <= 0:
             issues.append("%s.height must be positive" % param.name)
-        if "x" in raw and raw["x"] < 0:
+        if "x" in valid_numbers and raw["x"] < 0:
             issues.append("%s.x must be >= 0" % param.name)
-        if "y" in raw and raw["y"] < 0:
+        if "y" in valid_numbers and raw["y"] < 0:
             issues.append("%s.y must be >= 0" % param.name)
         return raw
     issues.append("%s: unsupported type %s" % (param.name, param.type))
