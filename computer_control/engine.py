@@ -153,7 +153,10 @@ class Engine:
         scale = args.get("scale") or 1.0
         canvas_width = max(1, int(round(self._surface.canvas_width * scale)))
         canvas_width = self._fit_max_area(canvas_width)
-        bbox = self._surface.region_to_physical_bbox(args.get("region"))
+        try:
+            bbox = self._surface.region_to_physical_bbox(args.get("region"))
+        except ValueError as exc:
+            return self._fail("invalid_arguments", str(exc), tool="screen.capture")
         try:
             payload = self._driver.capture(bbox=bbox, canvas_width=canvas_width,
                                            format=args.get("format") or "png",
