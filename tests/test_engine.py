@@ -52,6 +52,22 @@ class TestCapture(unittest.TestCase):
         # scale is 2.0 (3840/1920)
         self.assertEqual(capture["bbox"], (200, 100, 220, 140))
 
+    def test_capture_rejects_nonnumeric_region_fields(self):
+        invalid_regions = (
+            {"x": "0", "y": 0, "width": 10, "height": 10},
+            {"x": 0, "y": "0", "width": 10, "height": 10},
+            {"x": 0, "y": 0, "width": "10", "height": 10},
+            {"x": 0, "y": 0, "width": 10, "height": "10"},
+        )
+        for region in invalid_regions:
+            with self.subTest(region=region):
+                engine, driver, _, _, _ = make_engine()
+                result = engine.run_tool("screen.capture", {"region": region})
+
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"]["code"], "invalid_arguments")
+                self.assertFalse(any(event["kind"] == "capture" for event in driver.log()))
+
     def test_capture_rejects_fully_offscreen_region(self):
         engine, driver, _, _, _ = make_engine()
         result = engine.run_tool("screen.capture", {
