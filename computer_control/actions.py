@@ -122,8 +122,8 @@ def _build_registry() -> dict:
         summary="Click with a button, optionally after moving to a position. Prefer a11y.activate when the element is visible in the accessibility tree.",
         risk=RISK_MODERATE,
         params=[
-            _p("x", "float", "Model-space x coordinate; omit to click at the current pointer position.", minimum=0),
-            _p("y", "float", "Model-space y coordinate; omit to click at the current pointer position.", minimum=0),
+            _p("x", "float", "Model-space x coordinate; provide together with y, or omit both to click at the current pointer position.", minimum=0),
+            _p("y", "float", "Model-space y coordinate; provide together with x, or omit both to click at the current pointer position.", minimum=0),
             _p("button", "str", "Which button.", default="left", choices=["left", "middle", "right"]),
             _p("times", "int", "1, 2 or 3 (single, double, triple click).", default=1, minimum=1, maximum=3),
             _p("hold_ms", "int", "Hold the button down this long before releasing.", default=0, minimum=0, maximum=10_000),
@@ -152,8 +152,8 @@ def _build_registry() -> dict:
         params=[
             _p("axis", "str", "Scroll axis.", default="vertical", choices=["vertical", "horizontal"]),
             _p("amount", "float", "Wheel notches, signed: positive = up/right, negative = down/left.", required=True, minimum=-100, maximum=100),
-            _p("x", "float", "Move here first (model space).", minimum=0),
-            _p("y", "float", "Move here first (model space).", minimum=0),
+            _p("x", "float", "Model-space x coordinate; provide together with y, or omit both to scroll at the current pointer position.", minimum=0),
+            _p("y", "float", "Model-space y coordinate; provide together with x, or omit both to scroll at the current pointer position.", minimum=0),
         ],
         examples=[{"amount": -3}, {"amount": 5, "x": 800, "y": 450}],
     )

@@ -98,6 +98,28 @@ class TestPointerMapping(unittest.TestCase):
         clicks = [e for e in driver.log() if e["kind"] == "click"]
         self.assertEqual(clicks[0]["button"], "left")
 
+    def test_click_rejects_partial_coordinates_without_clicking(self):
+        for args in ({"x": 100}, {"y": 100}):
+            with self.subTest(args=args):
+                engine, driver, _, _, _ = make_engine()
+                result = engine.run_tool("pointer.click", args)
+
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"]["code"], "invalid_arguments")
+                self.assertFalse(any(event["kind"] in ("move", "click")
+                                     for event in driver.log()))
+
+    def test_scroll_rejects_partial_coordinates_without_scrolling(self):
+        for args in ({"amount": 1, "x": 100}, {"amount": 1, "y": 100}):
+            with self.subTest(args=args):
+                engine, driver, _, _, _ = make_engine()
+                result = engine.run_tool("pointer.scroll", args)
+
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"]["code"], "invalid_arguments")
+                self.assertFalse(any(event["kind"] in ("move", "scroll")
+                                     for event in driver.log()))
+
     def test_move_clamped_out_of_canvas(self):
         engine, driver, _, _, _ = make_engine()
         r = engine.run_tool("pointer.move", {"x": 99999, "y": 5000})
