@@ -85,10 +85,11 @@ class EventRing:
                     "dropped": self._dropped}
 
 
-def _notify(write, event_type, payload) -> None:
+def _notify(write, flush, event_type, payload) -> None:
     line = json.dumps({"jsonrpc": "2.0", "method": "event",
                        "params": {"type": event_type, "payload": payload}})
     write(line.encode("utf-8") + b"\n")
+    flush()
 
 
 def _install_sink(router: Router, ring: EventRing,
@@ -111,7 +112,7 @@ def serve_stdio(router: Router, stdin, stdout, stop_event: Optional[threading.Ev
     the router's event ring (so HTTP subscribers can replay them).
     """
     ring = EventRing()
-    _install_sink(router, ring, extra=lambda t, p: _notify(stdout.write, t, p))
+    _install_sink(router, ring, extra=lambda t, p: _notify(stdout.write, stdout.flush, t, p))
     while True:
         if stop_event is not None and stop_event.is_set():
             break
