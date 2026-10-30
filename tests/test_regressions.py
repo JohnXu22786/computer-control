@@ -14,7 +14,7 @@ import unittest
 from computer_control.config import from_dict
 from computer_control.policy import SafetyGate, EmitRecorder
 from computer_control.protocol import Router
-from computer_control.server import EventRing, serve_stdio
+from computer_control.server import EventRing, _notify, serve_stdio
 from computer_control.drivers.dummy import NullDriver
 from computer_control.session import Session
 
@@ -39,6 +39,24 @@ class FakeWriter:
 
     def flush(self):
         pass
+
+
+class BufferedWriter:
+    """Expose writes only after flush, like buffered stdio output."""
+
+    def __init__(self):
+        self.pending = b""
+        self.buffer = b""
+        self.flush_count = 0
+
+    def write(self, data):
+        self.pending += data
+        return len(data)
+
+    def flush(self):
+        self.buffer += self.pending
+        self.pending = b""
+        self.flush_count += 1
 
 
 def wait_for(predicate, timeout=3.0, interval=0.02):
@@ -85,6 +103,17 @@ class TestEventWiring(unittest.TestCase):
         events = [l["params"]["type"] for l in lines if l.get("method") == "event"]
         self.assertIn("safety.confirmation_requested", events)
         self.assertNotIn("safety.panic_triggered", events)
+
+    def test_stdio_notification_flushes_buffered_output(self):
+        writer = BufferedWriter()
+
+        _notify(writer.write, writer.flush, "confirmation.timeout", {"id": "pending"})
+
+        self.assertEqual(writer.pending, b"")
+        self.assertEqual(writer.flush_count, 1)
+        notification = json.loads(writer.buffer.decode("utf-8"))
+        self.assertEqual(notification["method"], "event")
+        self.assertEqual(notification["params"]["type"], "confirmation.timeout")
 
 
 class TestNotificationSemantics(unittest.TestCase):
