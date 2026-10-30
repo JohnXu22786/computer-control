@@ -6,15 +6,17 @@ classification, immutable config fields, standby/pending interaction,
 capture area caps and hotkey behavior from standby.
 """
 
+import http.client
 import json
 import threading
 import time
 import unittest
+from unittest import mock
 
 from computer_control.config import from_dict
 from computer_control.policy import SafetyGate, EmitRecorder
 from computer_control.protocol import Router
-from computer_control.server import EventRing, serve_stdio
+from computer_control.server import EventRing, make_http_server, serve_stdio
 from computer_control.drivers.dummy import NullDriver
 from computer_control.session import Session
 
@@ -184,6 +186,47 @@ class TestEventRing(unittest.TestCase):
         for i in range(20):
             ring.publish("e%d" % i, None)
         self.assertEqual(len(ring.recent()), 5)
+
+
+class TestSSEReplayLiveBoundary(unittest.TestCase):
+    def test_live_event_with_replay_tail_timestamp_is_delivered(self):
+        router = Router(driver_factory=lambda cfg: NullDriver(enable_a11y=True))
+        server = make_http_server(router, "127.0.0.1", 0)
+        server_thread = threading.Thread(target=server.serve_forever)
+        server_thread.start()
+        connection = http.client.HTTPConnection(*server.server_address, timeout=2)
+
+        try:
+            with mock.patch("computer_control.server.time.time", return_value=123.0):
+                router._event_ring.publish("replay.tail", {"n": 1})
+
+            connection.request("GET", "/events")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+
+            def read_event():
+                lines = []
+                while True:
+                    line = response.readline().decode("utf-8").rstrip("\r\n")
+                    if not line:
+                        return lines
+                    lines.append(line)
+
+            replay = read_event()
+            self.assertTrue(any('"type": "replay.tail"' in line for line in replay))
+
+            with mock.patch("computer_control.server.time.time", return_value=123.0):
+                router._event_ring.publish("live.equal_timestamp", {"n": 2})
+
+            live = read_event()
+            self.assertTrue(any('"type": "live.equal_timestamp"' in line for line in live))
+        finally:
+            connection.close()
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
+
+        self.assertFalse(server_thread.is_alive())
 
 
 class TestManifestConsistency(unittest.TestCase):

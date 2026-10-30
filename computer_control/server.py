@@ -47,6 +47,7 @@ class EventRing:
     def __init__(self, size: int = 200):
         self._size = size
         self._events = []
+        self._next_sequence = 1
         self._subscribers = set()
         self._dropped = 0
         self._lock = threading.Lock()
@@ -54,6 +55,8 @@ class EventRing:
     def publish(self, event_type: str, payload: Optional[dict]) -> None:
         event = {"type": event_type, "payload": payload, "at": time.time()}
         with self._lock:
+            event["_sequence"] = self._next_sequence
+            self._next_sequence += 1
             self._events.append(event)
             if len(self._events) > self._size:
                 self._events = self._events[-self._size:]
@@ -244,20 +247,22 @@ def make_http_server(router: Router, host: str, port: int):
             self.end_headers()
             import queue as queue_module
 
-            # subscribe first, then replay, then skip anything duplicated by
-            # the live feed (events are timestamped by the ring)
+            # Subscribe first, then replay. Sequence numbers let us skip
+            # replay events also present in the live queue without dropping
+            # distinct events that happen to share a timestamp.
             queue_ = ring.subscribe()
             try:
                 recent = ring.recent()
-                last_at = recent[-1]["at"] if recent else 0.0
+                last_sequence = recent[-1]["_sequence"] if recent else 0
                 for event in recent:
                     self._sse(event)
                 keepalive = time.monotonic()
                 while True:
                     try:
                         event = queue_.get(timeout=5)
-                        if event["at"] > last_at:
+                        if event["_sequence"] > last_sequence:
                             self._sse(event)
+                            last_sequence = event["_sequence"]
                     except queue_module.Empty:
                         if time.monotonic() - keepalive > 15:
                             self.wfile.write(b": keepalive\n\n")
