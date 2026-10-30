@@ -54,6 +54,7 @@ MOUSEEVENTF_MIDDLEDOWN = 0x0020
 MOUSEEVENTF_MIDDLEUP = 0x0040
 MOUSEEVENTF_WHEEL = 0x0800
 MOUSEEVENTF_HWHEEL = 0x1000
+MOUSEEVENTF_VIRTUALDESK = 0x4000
 MOUSEEVENTF_ABSOLUTE = 0x8000
 
 WHEEL_DELTA = 120
@@ -300,6 +301,7 @@ class WindowsDriver(BaseDriver):
         if flags & MOUSEEVENTF_ABSOLUTE:
             norm_x = int(round((dx - vx) * 65535 / max(vw - 1, 1)))
             norm_y = int(round((dy - vy) * 65535 / max(vh - 1, 1)))
+            flags |= MOUSEEVENTF_VIRTUALDESK
         else:
             norm_x, norm_y = int(dx), int(dy)
         inp = _INPUT()
