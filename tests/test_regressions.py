@@ -14,7 +14,7 @@ import unittest
 from computer_control.config import from_dict
 from computer_control.policy import SafetyGate, EmitRecorder
 from computer_control.protocol import Router
-from computer_control.server import EventRing, _notify, serve_stdio
+from computer_control.server import EventRing, serve_stdio
 from computer_control.drivers.dummy import NullDriver
 from computer_control.session import Session
 
@@ -27,6 +27,17 @@ class FakeReader:
         if not self.lines:
             return b""
         return self.lines.pop(0)
+
+
+class BlockingReader:
+    def __init__(self):
+        self.read_started = threading.Event()
+        self.finish = threading.Event()
+
+    def readline(self):
+        self.read_started.set()
+        self.finish.wait(3)
+        return b""
 
 
 class FakeWriter:
@@ -105,15 +116,26 @@ class TestEventWiring(unittest.TestCase):
         self.assertNotIn("safety.panic_triggered", events)
 
     def test_stdio_notification_flushes_buffered_output(self):
+        router = self._router()
+        reader = BlockingReader()
         writer = BufferedWriter()
+        server_thread = threading.Thread(target=serve_stdio, args=(router, reader, writer))
+        server_thread.start()
 
-        _notify(writer.write, writer.flush, "confirmation.timeout", {"id": "pending"})
+        try:
+            self.assertTrue(reader.read_started.wait(2))
+            router._event_sink("confirmation.timeout", {"id": "pending"})
 
-        self.assertEqual(writer.pending, b"")
-        self.assertEqual(writer.flush_count, 1)
-        notification = json.loads(writer.buffer.decode("utf-8"))
-        self.assertEqual(notification["method"], "event")
-        self.assertEqual(notification["params"]["type"], "confirmation.timeout")
+            self.assertEqual(writer.pending, b"")
+            self.assertEqual(writer.flush_count, 1)
+            notification = json.loads(writer.buffer.decode("utf-8"))
+            self.assertEqual(notification["method"], "event")
+            self.assertEqual(notification["params"]["type"], "confirmation.timeout")
+        finally:
+            reader.finish.set()
+            server_thread.join(timeout=2)
+
+        self.assertFalse(server_thread.is_alive())
 
 
 class TestNotificationSemantics(unittest.TestCase):
