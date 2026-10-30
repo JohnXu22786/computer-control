@@ -20,15 +20,15 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=False)
 
     serve = sub.add_parser("serve", help="run the plugin server (stdio by default)")
-    serve.add_argument("--config", help="path to a JSON configuration file (or set COMPUTER_CONTROL_CONFIG)")
+    serve.add_argument("--config", default=argparse.SUPPRESS, help="path to a JSON configuration file (or set COMPUTER_CONTROL_CONFIG)")
     serve.add_argument("--transport", choices=["stdio", "http"], default="stdio")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8765)
 
     check = sub.add_parser("check", help="diagnose the environment: platform, backends, capture, UIA")
-    check.add_argument("--config", help="path to a JSON configuration file (or set COMPUTER_CONTROL_CONFIG)")
+    check.add_argument("--config", default=argparse.SUPPRESS, help="path to a JSON configuration file (or set COMPUTER_CONTROL_CONFIG)")
     list_parser = sub.add_parser("list", help="print the declared tools and events")
-    list_parser.add_argument("--config", help="path to a JSON configuration file (or set COMPUTER_CONTROL_CONFIG)")
+    list_parser.add_argument("--config", default=argparse.SUPPRESS, help="path to a JSON configuration file (or set COMPUTER_CONTROL_CONFIG)")
     list_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     return parser
 

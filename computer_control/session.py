@@ -238,11 +238,14 @@ class Session:
             # floor keeps degenerate configs (max_wait_ms=1) from timing out
             # before the task even starts.
             timeout_s = max(0.5, self._cfg.runtime.max_wait_ms / 1000.0 + 60.0)
-        outcome = threading.Event()
-        holder = {"result": _error("driver_failed", "the action raised an internal error")}
-        task = (lambda: holder.update(result=engine.run_tool(tool, arguments)), outcome, holder)
+            outcome = threading.Event()
+            holder = {"result": _error("driver_failed", "the action raised an internal error")}
+            task = (lambda: holder.update(result=engine.run_tool(tool, arguments)), outcome, holder)
 
-        queue_.put(task)
+            # Admission and shutdown share this lock: stop cannot set the
+            # worker's stop flag and drain the queue between this decision and
+            # enqueueing an accepted task.
+            queue_.put(task)
         if not outcome.wait(timeout_s):
             # The task may still execute afterwards (it is queued); report
             # honestly that the outcome is unknown rather than a failure.

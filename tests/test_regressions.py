@@ -360,6 +360,83 @@ class TestStopSemantics(unittest.TestCase):
         v = gate.evaluate_allow_only("screen.capture", {})
         self.assertEqual(v.decision, "stopped")
 
+    def test_stop_cannot_drain_before_submit_enqueues(self):
+        session = self.session
+        # Keep the failure path short; _submit applies the 0.5s minimum after
+        # adding its normal 60s queueing grace.
+        session._cfg.runtime.max_wait_ms = -60_000
+        first_started = threading.Event()
+        release_first = threading.Event()
+        enqueue_started = threading.Event()
+        release_enqueue = threading.Event()
+        first_result = {}
+        second_result = {}
+        stop_result = {}
+        original_run_tool = session._engine.run_tool
+        original_put = session._worker_queue.put
+
+        def blocked_run_tool(tool, arguments):
+            first_started.set()
+            release_first.wait(3)
+            return original_run_tool(tool, arguments)
+
+        def blocked_put(task, *args, **kwargs):
+            enqueue_started.set()
+            release_enqueue.wait(3)
+            return original_put(task, *args, **kwargs)
+
+        session._engine.run_tool = blocked_run_tool
+
+        def submit_first():
+            first_result["result"] = session.call("wait.pause", {"ms": 1})
+
+        def submit_second():
+            second_result["result"] = session.call("wait.pause", {"ms": 1})
+
+        def stop_session():
+            stop_result["result"] = session.stop()
+
+        first_thread = threading.Thread(target=submit_first)
+        second_thread = threading.Thread(target=submit_second)
+        stop_thread = threading.Thread(target=stop_session)
+        try:
+            first_thread.start()
+            self.assertTrue(first_started.wait(2))
+            session._worker_queue.put = blocked_put
+            second_thread.start()
+            self.assertTrue(enqueue_started.wait(2))
+
+            stop_thread.start()
+            # With admission serialized by the session lock, stop must wait
+            # until this put completes. On the buggy implementation it sets
+            # the stop flag and drains before the delayed put is released.
+            stop_started_before_admission = session._stop_requested.wait(0.1)
+            if stop_started_before_admission:
+                release_first.set()
+                first_thread.join(timeout=2)
+                stop_thread.join(timeout=2)
+                release_enqueue.set()
+            else:
+                release_enqueue.set()
+                self.assertTrue(wait_for(session._stop_requested.is_set, timeout=2))
+                release_first.set()
+            first_thread.join(timeout=2)
+            stop_thread.join(timeout=2)
+            self.assertFalse(first_thread.is_alive())
+            self.assertFalse(stop_thread.is_alive())
+
+            second_thread.join(timeout=2)
+            self.assertFalse(second_thread.is_alive())
+            self.assertNotEqual(first_result["result"].get("error", {}).get("code"), "timeout")
+            self.assertTrue(stop_result["result"]["ok"])
+            self.assertEqual(second_result["result"]["error"]["code"], "safety_stopped")
+        finally:
+            release_first.set()
+            release_enqueue.set()
+            for thread in (first_thread, second_thread, stop_thread):
+                if thread.ident is not None:
+                    thread.join(timeout=2)
+
 
 class TestConfirmEventOrder(unittest.TestCase):
     def test_event_order_after_approval(self):
@@ -574,6 +651,33 @@ class TestCheckExitCode(unittest.TestCase):
 
 
 class TestCliCommands(unittest.TestCase):
+    def test_config_option_before_or_after_command_overrides_environment(self):
+        import os
+        import tempfile
+        from computer_control import cli
+
+        with tempfile.TemporaryDirectory() as d:
+            explicit = os.path.join(d, "explicit.json")
+            invalid_env = os.path.join(d, "invalid-env.json")
+            with open(explicit, "w", encoding="utf-8") as fh:
+                json.dump({"platform": {"name": "dry-run"}}, fh)
+            with open(invalid_env, "w", encoding="utf-8") as fh:
+                fh.write("{invalid json")
+
+            old_env = os.environ.get("COMPUTER_CONTROL_CONFIG")
+            os.environ["COMPUTER_CONTROL_CONFIG"] = invalid_env
+            try:
+                for argv in (("--config", explicit, "check"),
+                             ("check", "--config", explicit)):
+                    with self.subTest(argv=argv):
+                        args = cli._build_parser().parse_args(argv)
+                        self.assertEqual(cli._config(args).platform.name, "dry-run")
+            finally:
+                if old_env is None:
+                    os.environ.pop("COMPUTER_CONTROL_CONFIG", None)
+                else:
+                    os.environ["COMPUTER_CONTROL_CONFIG"] = old_env
+
     def test_version_flag(self):
         import subprocess
         import sys
