@@ -29,6 +29,17 @@ class FakeReader:
         return self.lines.pop(0)
 
 
+class BlockingReader:
+    def __init__(self):
+        self.read_started = threading.Event()
+        self.finish = threading.Event()
+
+    def readline(self):
+        self.read_started.set()
+        self.finish.wait(3)
+        return b""
+
+
 class FakeWriter:
     def __init__(self):
         self.buffer = b""
@@ -39,6 +50,24 @@ class FakeWriter:
 
     def flush(self):
         pass
+
+
+class BufferedWriter:
+    """Expose writes only after flush, like buffered stdio output."""
+
+    def __init__(self):
+        self.pending = b""
+        self.buffer = b""
+        self.flush_count = 0
+
+    def write(self, data):
+        self.pending += data
+        return len(data)
+
+    def flush(self):
+        self.buffer += self.pending
+        self.pending = b""
+        self.flush_count += 1
 
 
 def wait_for(predicate, timeout=3.0, interval=0.02):
@@ -85,6 +114,28 @@ class TestEventWiring(unittest.TestCase):
         events = [l["params"]["type"] for l in lines if l.get("method") == "event"]
         self.assertIn("safety.confirmation_requested", events)
         self.assertNotIn("safety.panic_triggered", events)
+
+    def test_stdio_notification_flushes_buffered_output(self):
+        router = self._router()
+        reader = BlockingReader()
+        writer = BufferedWriter()
+        server_thread = threading.Thread(target=serve_stdio, args=(router, reader, writer))
+        server_thread.start()
+
+        try:
+            self.assertTrue(reader.read_started.wait(2))
+            router._event_sink("confirmation.timeout", {"id": "pending"})
+
+            self.assertEqual(writer.pending, b"")
+            self.assertEqual(writer.flush_count, 1)
+            notification = json.loads(writer.buffer.decode("utf-8"))
+            self.assertEqual(notification["method"], "event")
+            self.assertEqual(notification["params"]["type"], "confirmation.timeout")
+        finally:
+            reader.finish.set()
+            server_thread.join(timeout=2)
+
+        self.assertFalse(server_thread.is_alive())
 
 
 class TestNotificationSemantics(unittest.TestCase):
