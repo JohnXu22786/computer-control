@@ -574,6 +574,33 @@ class TestCheckExitCode(unittest.TestCase):
 
 
 class TestCliCommands(unittest.TestCase):
+    def test_config_option_before_or_after_command_overrides_environment(self):
+        import os
+        import tempfile
+        from computer_control import cli
+
+        with tempfile.TemporaryDirectory() as d:
+            explicit = os.path.join(d, "explicit.json")
+            invalid_env = os.path.join(d, "invalid-env.json")
+            with open(explicit, "w", encoding="utf-8") as fh:
+                json.dump({"platform": {"name": "dry-run"}}, fh)
+            with open(invalid_env, "w", encoding="utf-8") as fh:
+                fh.write("{invalid json")
+
+            old_env = os.environ.get("COMPUTER_CONTROL_CONFIG")
+            os.environ["COMPUTER_CONTROL_CONFIG"] = invalid_env
+            try:
+                for argv in (("--config", explicit, "check"),
+                             ("check", "--config", explicit)):
+                    with self.subTest(argv=argv):
+                        args = cli._build_parser().parse_args(argv)
+                        self.assertEqual(cli._config(args).platform.name, "dry-run")
+            finally:
+                if old_env is None:
+                    os.environ.pop("COMPUTER_CONTROL_CONFIG", None)
+                else:
+                    os.environ["COMPUTER_CONTROL_CONFIG"] = old_env
+
     def test_version_flag(self):
         import subprocess
         import sys
