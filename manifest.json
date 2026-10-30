@@ -228,14 +228,14 @@
         {
           "name": "x",
           "type": "float",
-          "description": "Model-space x coordinate; omit to click at the current pointer position.",
+          "description": "Model-space x coordinate; provide together with y, or omit both to click at the current pointer position.",
           "required": false,
           "minimum": 0
         },
         {
           "name": "y",
           "type": "float",
-          "description": "Model-space y coordinate; omit to click at the current pointer position.",
+          "description": "Model-space y coordinate; provide together with x, or omit both to click at the current pointer position.",
           "required": false,
           "minimum": 0
         },
@@ -380,14 +380,14 @@
         {
           "name": "x",
           "type": "float",
-          "description": "Move here first (model space).",
+          "description": "Model-space x coordinate; provide together with y, or omit both to scroll at the current pointer position.",
           "required": false,
           "minimum": 0
         },
         {
           "name": "y",
           "type": "float",
-          "description": "Move here first (model space).",
+          "description": "Model-space y coordinate; provide together with x, or omit both to scroll at the current pointer position.",
           "required": false,
           "minimum": 0
         }
