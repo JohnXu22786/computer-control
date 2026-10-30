@@ -217,11 +217,255 @@ class TestImmutableConfig(unittest.TestCase):
                 self.session.configure(patch)
             self.assertEqual(ctx.exception.code, "invalid_config", patch)
 
+    def test_auth_profile_survives_unrelated_configure(self):
+        # session.configure round-trips the whole config; a profile that is
+        # dropped on the way back through as_dict/from_dict would silently
+        # widen the agent's own permissions.
+        session = Session(emit=lambda t, p=None: None,
+                          driver_factory=lambda cfg: NullDriver(enable_a11y=True),
+                          base_config={"safety": {"auth_profile": "read_only"}})
+        try:
+            session.start({})
+            self.assertTrue(session.configure({"safety": {"confirm_threshold": "moderate"}})["ok"])
+            r = session.call("pointer.click", {"button": "left"})
+            self.assertEqual((r.get("error") or {}).get("code"), "not_authorized")
+        finally:
+            session.stop()
+
     def test_rules_still_configurable(self):
         result = self.session.configure({"safety": {"rules": [{"match": {"tool": "pointer.click"}, "effect": "deny"}]}})
         self.assertTrue(result["ok"])
         r = self.session.call("pointer.click", {})
         self.assertEqual(r["error"]["code"], "policy_denied")
+
+
+class TestGrantChannel(unittest.TestCase):
+    """In-band narrowing vs the host-only widening channel."""
+
+    def make(self, base_config):
+        return Session(emit=lambda t, p=None: None,
+                       driver_factory=lambda cfg: NullDriver(enable_a11y=True),
+                       base_config=base_config)
+
+    def test_agent_may_narrow_but_not_widen(self):
+        from computer_control.session import SessionError
+
+        session = self.make({"safety": {"auth_profile": "full"}})
+        try:
+            session.start({})
+            self.assertTrue(session.configure({"safety": {"auth_profile": "read_only"}})["ok"])
+            self.assertEqual((session.call("pointer.click", {}).get("error") or {}).get("code"),
+                             "not_authorized")
+            with self.assertRaises(SessionError) as ctx:
+                session.configure({"safety": {"auth_profile": "full"}})
+            self.assertEqual(ctx.exception.code, "invalid_config")
+            # the rejected widening left the narrowing in place
+            self.assertEqual((session.call("pointer.click", {}).get("error") or {}).get("code"),
+                             "not_authorized")
+            self.assertEqual(session.state, "ready")
+        finally:
+            session.stop()
+
+    def test_revoked_is_a_one_way_door_in_band(self):
+        from computer_control.session import SessionError
+
+        session = self.make({"safety": {"auth_profile": "limited"}})
+        try:
+            session.start({})
+            self.assertTrue(session.configure({"safety": {"auth_profile": "read_only"}})["ok"])
+            self.assertTrue(session.configure({"safety": {"auth_profile": "revoked"}})["ok"])
+            with self.assertRaises(SessionError):
+                session.configure({"safety": {"auth_profile": "read_only"}})
+            self.assertTrue(session.call("screen.capture", {})["ok"])
+            self.assertEqual(session.state, "ready")
+        finally:
+            session.stop()
+
+    def test_host_grant_profile_widens(self):
+        session = self.make({"safety": {"auth_profile": "read_only"}})
+        try:
+            session.start({})
+            self.assertEqual((session.call("pointer.click", {}).get("error") or {}).get("code"),
+                             "not_authorized")
+            result = session.grant_profile("full")
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["result"]["auth_profile"], "full")
+            self.assertTrue(session.call("pointer.click", {})["ok"])
+        finally:
+            session.stop()
+
+    def test_grant_profile_is_not_routable(self):
+        from computer_control.protocol import METHOD_NOT_FOUND
+
+        router = Router(lambda: self.make({"safety": {"auth_profile": "read_only"}}))
+        router.handle({"jsonrpc": "2.0", "id": 1, "method": "session.start", "params": {}})
+        for method in ("session.grant_profile", "control.grant_profile", "grant_profile"):
+            response = router.handle({"jsonrpc": "2.0", "id": 2, "method": method,
+                                      "params": {"profile": "full"}})
+            self.assertEqual(METHOD_NOT_FOUND, response["error"]["code"], method)
+        # the in-band route cannot widen either
+        response = router.handle({"jsonrpc": "2.0", "id": 3, "method": "session.configure",
+                                  "params": {"patch": {"safety": {"auth_profile": "full"}}}})
+        self.assertFalse(response["result"]["ok"])
+        self.assertEqual("invalid_config", response["result"]["error"]["code"])
+
+    def test_revoked_session_keeps_observation(self):
+        session = self.make({"safety": {"auth_profile": "revoked"}})
+        try:
+            session.start({})
+            self.assertTrue(session.call("screen.capture", {})["ok"])
+            self.assertTrue(session.call("a11y.snapshot", {})["ok"])
+            for tool, args in (("keyboard.type", {"text": "hi"}),
+                               ("wait.pause", {"ms": 1}),
+                               ("batch.execute", {"items": [{"tool": "pointer.click"}]})):
+                result = session.call(tool, args)
+                self.assertEqual((result.get("error") or {}).get("code"), "not_authorized", tool)
+            self.assertEqual(session.state, "ready")
+            self.assertEqual(session.status()["result"]["state"], "ready")
+        finally:
+            session.stop()
+
+
+    def test_restart_over_rpc_cannot_widen(self):
+        # stop+start is in-band too: the host's config file caps what a restarted
+        # session may ask for.
+        router = Router(lambda: self.make({"safety": {"auth_profile": "read_only"}}))
+        router.handle({"jsonrpc": "2.0", "id": 1, "method": "session.start", "params": {}})
+        router.handle({"jsonrpc": "2.0", "id": 2, "method": "session.stop", "params": {}})
+        response = router.handle({"jsonrpc": "2.0", "id": 3, "method": "session.start",
+                                  "params": {"config": {"safety": {"auth_profile": "full"}}}})
+        self.assertFalse(response["result"]["ok"])
+        self.assertEqual("invalid_config", response["result"]["error"]["code"])
+        # the refused restart must not leave a widened session behind
+        router.handle({"jsonrpc": "2.0", "id": 4, "method": "session.start", "params": {}})
+        response = router.handle({"jsonrpc": "2.0", "id": 5, "method": "tools.call",
+                                  "params": {"tool": "pointer.click", "arguments": {}}})
+        self.assertEqual("not_authorized", response["result"]["error"]["code"])
+
+    def test_host_grant_does_not_survive_restart(self):
+        # A runtime grant is per-session; coming back up falls to the host's cap.
+        session = self.make({"safety": {"auth_profile": "read_only"}})
+        try:
+            session.start({})
+            self.assertTrue(session.grant_profile("full")["ok"])
+            self.assertTrue(session.call("pointer.click", {})["ok"])
+        finally:
+            session.stop()
+        try:
+            session.start({})
+            self.assertEqual((session.call("pointer.click", {}).get("error") or {}).get("code"),
+                             "not_authorized")
+        finally:
+            session.stop()
+
+    def test_restart_without_profile_cannot_regain_base_authority(self):
+        # downgrade -> stop -> start without auth_profile: the session must
+        # come back up at the narrowed profile, not silently reload the wider
+        # profile from the host's own config file.
+        session = self.make({"safety": {"auth_profile": "full"}})
+        try:
+            session.start({})
+            self.assertTrue(session.configure({"safety": {"auth_profile": "read_only"}})["ok"])
+            self.assertEqual((session.call("pointer.click", {}).get("error") or {}).get("code"),
+                             "not_authorized")
+        finally:
+            session.stop()
+        try:
+            r = session.start({})
+            self.assertTrue(r["ok"])
+            self.assertEqual(r["result"]["auth_profile"], "read_only")
+            result = session.call("pointer.click", {})
+            self.assertEqual(result["error"]["code"], "not_authorized")
+            self.assertEqual(result["error"]["data"]["auth_profile"], "read_only")
+            # the host's explicit grant is the way back up
+            self.assertTrue(session.grant_profile("full")["ok"])
+            self.assertTrue(session.call("pointer.click", {})["ok"])
+        finally:
+            session.stop()
+
+    def test_restart_explicit_profile_wider_than_floor_rejected(self):
+        # an explicit start profile that widens vs the sticky floor is
+        # rejected even when it does not widen vs the host's config file
+        from computer_control.session import SessionError
+
+        session = self.make({"safety": {"auth_profile": "full"}})
+        try:
+            session.start({})
+            self.assertTrue(session.configure({"safety": {"auth_profile": "read_only"}})["ok"])
+        finally:
+            session.stop()
+        with self.assertRaises(SessionError) as ctx:
+            session.start({"safety": {"auth_profile": "limited"}})
+        self.assertEqual(ctx.exception.code, "invalid_config")
+        try:
+            session.start({})
+            self.assertEqual((session.call("pointer.click", {}).get("error") or {}).get("code"),
+                             "not_authorized")
+        finally:
+            session.stop()
+
+    def test_host_grant_lifts_the_restart_cap(self):
+        # the host explicitly granted after the narrowing, so a later restart
+        # is no longer capped at the narrowed profile
+        session = self.make({"safety": {"auth_profile": "full"}})
+        try:
+            session.start({})
+            self.assertTrue(session.configure({"safety": {"auth_profile": "read_only"}})["ok"])
+            self.assertTrue(session.grant_profile("full")["ok"])
+        finally:
+            session.stop()
+        try:
+            r = session.start({})
+            self.assertTrue(r["ok"])
+            self.assertEqual(r["result"]["auth_profile"], "full")
+            self.assertTrue(session.call("pointer.click", {})["ok"])
+        finally:
+            session.stop()
+
+
+class TestApprovalDowngradeRace(unittest.TestCase):
+    """Round-3: an approval collected while the action was still legal must
+    not execute after the authorization profile narrowed, including through
+    the real session worker queue."""
+
+    def test_approved_action_refused_when_downgraded_before_execution(self):
+        emit = EmitRecorder()
+        driver = NullDriver(enable_a11y=True)
+        session = Session(emit=emit, driver_factory=lambda cfg: driver,
+                          base_config={"safety": {"auth_profile": "full"}})
+        release = release2 = threading.Event()
+        try:
+            session.start({"safety": {"confirm_threshold": "moderate"}})
+            # hold the worker so the combo call queues behind a blocker
+            session._worker_queue.put((release.wait, threading.Event(), {"result": None}))
+            results = {}
+
+            def submit():
+                results["call"] = session.call("keyboard.combo", {"keys": ["win", "r"]})
+
+            thread = threading.Thread(target=submit)
+            thread.start()
+            release.set()  # worker: blocker done -> combo evaluates -> awaiting_confirmation
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            rid = results["call"]["result"]["request_id"]
+            # block the worker again, approve, then downgrade while the
+            # approved action is still queued
+            session._worker_queue.put((release2.wait, threading.Event(), {"result": None}))
+            self.assertTrue(session.confirm(rid, approve=True)["ok"])
+            self.assertTrue(session.configure({"safety": {"auth_profile": "read_only"}})["ok"])
+            release2.set()
+            self.assertTrue(wait_for(lambda: "action.finished" in emit.types()))
+            self.assertEqual([e for e in driver.log() if e["kind"] == "combo"], [])
+            finished = [p for t, p in emit.dump() if t == "action.finished"]
+            self.assertEqual([p.get("error_code") for p in finished], ["not_authorized"])
+        finally:
+            release.set()
+            release2.set()
+            try:
+                session.stop()
+            except Exception:
+                pass
 
 
 class TestStandbyInteraction(unittest.TestCase):

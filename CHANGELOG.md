@@ -8,9 +8,41 @@ All notable changes are tracked here. Format loosely follows
 ### Added
 
 - Added `--version` / `-V` CLI flag to inspect package version from the command line.
+- Added runtime authorization profiles (`safety.auth_profile`: `full` /
+  `limited` / `read_only` / `revoked`) as an axis orthogonal to the operational
+  state. The check runs ahead of the allow/deny rule scan, on the path shared
+  by plain and batch-internal actions, so batching cannot bypass a profile;
+  refused actions return a new `not_authorized` decision, reported with the
+  active profile in `error.data.auth_profile`. `revoked` is the bottom rung of
+  that ladder rather than a fifth state or another emergency stop: it keeps
+  the observation tools (`screen.capture`, `a11y.snapshot`) running, cancels a
+  pending confirmation the moment it is entered, and leaves `state` at `ready`.
+- Added the grant channel for changing a profile on a live session.
+  `session.configure` is the agent-reachable path and may only narrow
+  `safety.auth_profile` or hold it; any widening, including one step up out of
+  `revoked`, is rejected with `invalid_config`. `session.start` is capped the
+  same way — the profile in the host's own config file bounds a restarted
+  session, so stop-then-restart is not an escape hatch, and a runtime grant
+  does not survive a restart. The host moves profiles in any direction with
+  `Session.grant_profile(new_profile, actor="host")`, a direct Python call
+  deliberately absent from the JSON-RPC handler table. Each change emits a
+  `safety.grant_changed` event.
 
 ### Fixed
 
+- Hardened the authorization-profile channel against three review findings:
+  a downgrade is sticky across restarts of the same session object (a
+  `session.start` that omits `auth_profile` comes up at the narrowed profile
+  instead of silently reloading the wider one from the host's config file, and
+  an explicit start profile wider than the floor is rejected), a downgrade
+  cancels a pending confirmation whose tool the new profile no longer
+  authorizes, and every action is re-gated with `evaluate_allow_only` right
+  before execution so an approval collected before a downgrade/revoke cannot
+  run afterwards (the refusal surfaces as `action.finished` with
+  `error_code: not_authorized`). Plain `tools.call` `not_authorized` errors
+  now carry the active profile in `error.data.auth_profile`, matching the
+  batch path and the protocol docs, and `session.start` reports the effective
+  `auth_profile`.
 - Handled URLError, connection timeouts, and malformed JSON responses in `HttpClient` and `_BaseClient`, converting them into typed `ClientError` exceptions.
 - Added manifest validation regression test asserting complete parity between `manifest()` and `manifest.json`.
 - Aligned JSON-RPC 2.0 error codes to standard values (`-32603` for internal errors, `-32000` for server errors).

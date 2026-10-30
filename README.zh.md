@@ -2,7 +2,7 @@
 
 # computer-control — 桌面控制插件（for dsh）
 
-让 agent 直接操作电脑桌面：截屏观察、鼠标/键盘注入、通过可访问性树实现的语义操作（语义优先、像素坐标兜底），并内置急停、允许/拒绝规则、确认流与空闲待机等安全护栏。
+让 agent 直接操作电脑桌面：截屏观察、鼠标/键盘注入、通过可访问性树实现的语义操作（语义优先、像素坐标兜底），并内置急停、授权模式、允许/拒绝规则、确认流与空闲待机等安全护栏。
 
 插件自包含、可被 dsh 直接加载：通过 `manifest.json` 声明工具与事件，以**行分隔 JSON-RPC 2.0**（stdio）为传输协议，`python -m computer_control serve` 即入口。
 
@@ -23,6 +23,7 @@
 安全护栏（详见「安全」一节）：
 
 - **急停**：全局热键（默认 `Ctrl+Alt+F12`，可配）、协议指令、panic 文件三重触发；屏幕角落显示 STOP 横幅
+- **授权模式**：`read_only` / `limited` / `full` / `revoked` 收窄可通过安全门的工具集——独立于操作状态的正交轴，在 `session.start` 固化，因此 agent 无法在带内自行扩权
 - **允许/拒绝规则**：按工具名与参数匹配，拒绝永远优先；可切换白名单模式
 - **确认流**：高风险动作（含 `win` 键或 `ctrl+alt` 的组合键等）等待人工批准，超时自动拒绝
 - **空闲待机**：无操作超过阈值自动进入待机，拒绝一切动作直到恢复
@@ -154,6 +155,8 @@ python examples/demo.py
 详见 [`docs/configuration.md`](docs/configuration.md#safety) 与 README 下方要点：
 
 - **急停（三重）**：默认全局热键 `Ctrl+Alt+F12`（配置 `safety.emergency_hotkey`，可置空禁用）；协议方法 `control.panic`；panic 文件（`safety.panic_file`，存在即停）。急停后所有动作返回 `safety_stopped`；`session.resume` 或再次按热键恢复。急停生效时桌面角落显示红色 STOP 横幅（`safety.visual_indicator`）。
+- **授权模式**（`safety.auth_profile`，默认 `full`）：一条由宽到窄的能力阶梯。`full` 不做收窄；`limited` 在此基础上额外拒绝所有 `keyboard.*` 动作；`read_only` 仅放行观察类工具（`screen.capture`、`a11y.snapshot`）；`revoked` 与 `read_only` 共享同一观察底线，但进入的那一刻会取消待确认请求。被拒动作返回 `not_authorized`。**它是独立于上述操作状态的正交轴**，而非第五个状态：只缩小能通过安全门的工具集合，`ready` / `standby` / `stopped` 的含义不变，也**不触发急停**——`revoked` 会话的 `state` 仍是 `ready`。该检查位于允许/拒绝规则扫描**之前**，且普通动作与批量内层动作共用同一求值点，因此无法借批量绕过授权模式。
+  提权只走带外：`session.configure`（agent 经 RPC 可达）接受**收窄或维持**当前阶梯位置的 `auth_profile`，任何变宽都返回 `invalid_config`，哪怕只是 `revoked → read_only` 一步。`session.start` 同样属于带内，所以「先 stop 再 start」也不是逃生门：重启后的会话以宿主配置文件里声明的模式、以及**该会话对象上 agent 带内降到过的最窄档位**为上限——降权是粘性的，不传 `auth_profile` 的重启也会以收窄后的档位启动（只有宿主 grant 才能抬高上限），运行时提权也不跨重启保留。宿主改权限要直接调用 Python 方法 `Session.grant_profile(new_profile, actor="host")`；该方法刻意不注册进 JSON-RPC 路由表，`actor` 只是审计事件标签。每次生效都会发出 `safety.grant_changed` 事件。降级会取消不再满足新档位的待确认请求；每个动作在执行前都会重新过门，批准后才被降权/收回的动作不会执行。已知代价：agent 可以把自身一路降到 `revoked`，之后必须由宿主解锁。
 - **允许/拒绝规则**（`safety.rules`）：`{match: {tool: "keyboard.*", argument: {name, matcher, value}}, effect: "deny"}`；拒绝规则永远优先于允许。`safety.default_rule: "deny"` 可切换为白名单模式（未显式允许的动作一律拒绝）。规则可运行时通过 `session.configure` 调整。
 - **确认流**：`safety.confirm_threshold`（默认 `high`）决定哪些风险等级需要人工批准；`safety.confirm_timeout_s`（默认 30s）超时自动拒绝。批准后动作照常执行并发出 `action.finished`。
 - **空闲待机**：`safety.idle_timeout_s` 大于 0 时启用，无操作超时进入待机（`session.idle` 事件），`session.resume` 恢复；`idle_action: "none"` 则只发事件不停摆。

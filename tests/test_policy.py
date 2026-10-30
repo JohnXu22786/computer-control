@@ -241,6 +241,158 @@ class TestEmergencyStop(unittest.TestCase):
         self.assertEqual(gate.state, "ready")
 
 
+class TestAuthorizationProfiles(unittest.TestCase):
+    """Authorization profiles are an axis orthogonal to the operational state:
+    they narrow which tools clear the gate, and never introduce a state."""
+
+    def test_read_only_blocks_writes(self):
+        gate = make_gate({"safety": {"auth_profile": "read_only"}})
+        for tool in ("screen.capture", "a11y.snapshot"):
+            self.assertEqual(gate.evaluate(tool, {}).decision, "allow", tool)
+        for tool, args in (("pointer.click", {}), ("keyboard.type", {"text": "hi"}),
+                          ("a11y.activate", {}), ("batch.execute", {"items": []})):
+            v = gate.evaluate(tool, args)
+            self.assertEqual(v.decision, "not_authorized", tool)
+            self.assertEqual(v.data.get("auth_profile"), "read_only", tool)
+        self.assertEqual(gate.state, "ready")
+
+    def test_limited_blocks_keyboard(self):
+        gate = make_gate({"safety": {"auth_profile": "limited"}})
+        for tool in ("keyboard.type", "keyboard.press", "keyboard.combo"):
+            self.assertEqual(gate.evaluate(tool, {}).decision, "not_authorized", tool)
+        self.assertEqual(gate.evaluate("pointer.click", {}).decision, "allow")
+        self.assertEqual(gate.evaluate("screen.capture", {}).decision, "allow")
+        self.assertEqual(gate.state, "ready")
+
+    def test_full_profile_is_unrestricted(self):
+        gate = make_gate({"safety": {"auth_profile": "full"}})
+        for tool in ("screen.capture", "pointer.click", "keyboard.type", "wait.pause"):
+            self.assertEqual(gate.evaluate(tool, {}).decision, "allow", tool)
+
+    def test_batch_inner_actions_are_gated(self):
+        # evaluate_allow_only is the batch-internal path; confirmation is
+        # already granted there, so authorization must still refuse.
+        gate = make_gate({"safety": {"auth_profile": "read_only"}})
+        self.assertEqual(gate.evaluate_allow_only("pointer.click", {}).decision, "not_authorized")
+        self.assertEqual(gate.evaluate_allow_only("keyboard.type", {}).decision, "not_authorized")
+        self.assertEqual(gate.evaluate_allow_only("screen.capture", {}).decision, "allow")
+
+    def test_revoked_keeps_observation_and_stays_ready(self):
+        emit = EmitRecorder()
+        gate = make_gate({"safety": {"auth_profile": "revoked"}}, emit=emit)
+        for tool in ("screen.capture", "a11y.snapshot"):
+            self.assertEqual(gate.evaluate(tool, {}).decision, "allow", tool)
+        for tool in ("pointer.click", "keyboard.type", "wait.pause", "batch.execute"):
+            v = gate.evaluate(tool, {})
+            self.assertEqual(v.decision, "not_authorized", tool)
+            self.assertEqual(v.data.get("auth_profile"), "revoked", tool)
+        # revoked is a rung on the capability ladder, not an emergency stop.
+        self.assertEqual(gate.state, "ready")
+        self.assertNotIn("safety.panic_triggered", emit.types())
+        # the batch-internal path sees the same floor.
+        self.assertEqual(gate.evaluate_allow_only("screen.capture", {}).decision, "allow")
+        self.assertEqual(gate.evaluate_allow_only("pointer.click", {}).decision, "not_authorized")
+
+    def test_entering_revoked_cancels_pending_confirmation(self):
+        # An approval collected before the withdrawal must not run afterwards.
+        emit = EmitRecorder()
+        gate = make_gate({"safety": {"auth_profile": "full", "confirm_threshold": "high"}}, emit=emit)
+        v = gate.evaluate("keyboard.combo", {"keys": ["win", "r"]})
+        self.assertEqual(v.decision, "confirm")
+        rid = v.data["request_id"]
+        gate.set_grant("revoked")
+        self.assertIsNone(gate.pending_confirmation())
+        self.assertIn("safety.confirmation_resolved", emit.types())
+        self.assertEqual(gate.state, "ready")
+        with self.assertRaises(PolicyError) as ctx:
+            gate.resolve(rid, approve=True)
+        self.assertEqual(ctx.exception.code, "confirmation_not_found")
+
+    def test_downgrade_cancels_pending_confirmation_the_profile_blocks(self):
+        # A downgrade must cancel a pending confirmation whose tool the new
+        # profile no longer authorizes - not just entering revoked.
+        emit = EmitRecorder()
+        gate = make_gate({"safety": {"auth_profile": "full", "confirm_threshold": "moderate"}}, emit=emit)
+        v = gate.evaluate("pointer.click", {"button": "left"})
+        self.assertEqual(v.decision, "confirm")
+        rid = v.data["request_id"]
+        gate.set_grant("read_only")
+        self.assertIsNone(gate.pending_confirmation())
+        self.assertIn("safety.confirmation_resolved", emit.types())
+        self.assertEqual(gate.state, "ready")
+        with self.assertRaises(PolicyError) as ctx:
+            gate.resolve(rid, approve=True)
+        self.assertEqual(ctx.exception.code, "confirmation_not_found")
+
+    def test_downgrade_to_limited_cancels_pending_keyboard_confirmation(self):
+        emit = EmitRecorder()
+        gate = make_gate({"safety": {"auth_profile": "full", "confirm_threshold": "high"}}, emit=emit)
+        v = gate.evaluate("keyboard.combo", {"keys": ["win", "r"]})
+        self.assertEqual(v.decision, "confirm")
+        rid = v.data["request_id"]
+        gate.set_grant("limited")  # keyboard.* is refused under limited
+        self.assertIsNone(gate.pending_confirmation())
+        with self.assertRaises(PolicyError):
+            gate.resolve(rid, approve=True)
+
+    def test_downgrade_keeps_pending_confirmation_still_allowed(self):
+        emit = EmitRecorder()
+        gate = make_gate({"safety": {"auth_profile": "full", "confirm_threshold": "moderate"}}, emit=emit)
+        v = gate.evaluate("pointer.click", {"button": "left"})
+        self.assertEqual(v.decision, "confirm")
+        rid = v.data["request_id"]
+        gate.set_grant("limited")  # pointer.* stays authorized under limited
+        self.assertIsNotNone(gate.pending_confirmation())
+        self.assertEqual(gate.resolve(rid, approve=True).status, "approved")
+
+    def test_downgrade_keeps_pending_observation_confirmation(self):
+        # An observation tool pending at threshold 'benign' remains approvable
+        # after narrowing to read_only: it sits on the shared observation floor.
+        emit = EmitRecorder()
+        gate = make_gate({"safety": {"auth_profile": "full", "confirm_threshold": "benign"}}, emit=emit)
+        v = gate.evaluate("screen.capture", {})
+        self.assertEqual(v.decision, "confirm")
+        rid = v.data["request_id"]
+        gate.set_grant("read_only")
+        self.assertIsNotNone(gate.pending_confirmation())
+        self.assertEqual(gate.resolve(rid, approve=True).status, "approved")
+
+    def test_reconfigure_to_revoked_cancels_pending_confirmation(self):
+        # reconfigure is the funnel both channels go through.
+        gate = make_gate({"safety": {"auth_profile": "limited", "confirm_threshold": "moderate"}})
+        v = gate.evaluate("pointer.click", {})
+        self.assertEqual(v.decision, "confirm")
+        rid = v.data["request_id"]
+        gate.reconfigure(from_dict({"safety": {"auth_profile": "revoked",
+                                               "confirm_threshold": "moderate"}}).safety)
+        self.assertIsNone(gate.pending_confirmation())
+        self.assertEqual(gate.state, "ready")
+        with self.assertRaises(PolicyError):
+            gate.resolve(rid, approve=True)
+
+    def test_revoked_creates_no_new_confirmations(self):
+        # The grant sits ahead of the confirmation flow, so revoking cannot be
+        # undone by a later action re-arming a pending request.
+        emit = EmitRecorder()
+        gate = make_gate({"safety": {"auth_profile": "revoked", "confirm_threshold": "high"}}, emit=emit)
+        v = gate.evaluate("keyboard.combo", {"keys": ["win", "r"]})
+        self.assertEqual(v.decision, "not_authorized")
+        self.assertNotIn("safety.confirmation_requested", emit.types())
+        self.assertEqual(gate.state, "ready")
+
+    def test_grant_allowlist_does_not_exempt_from_deny_rules(self):
+        gate = make_gate({"safety": {"auth_profile": "read_only",
+                                     "rules": [{"match": {"tool": "screen.capture"}, "effect": "deny"}]}})
+        self.assertEqual(gate.evaluate("screen.capture", {}).decision, "deny")
+
+    def test_grant_check_precedes_rule_scan(self):
+        # The grant sits ahead of the rules, so a tool the profile already
+        # refuses reports not_authorized even when a deny rule would match.
+        gate = make_gate({"safety": {"auth_profile": "read_only",
+                                     "rules": [{"match": {"tool": "pointer.*"}, "effect": "deny"}]}})
+        self.assertEqual(gate.evaluate("pointer.click", {}).decision, "not_authorized")
+
+
 class TestIdleWatchdog(unittest.TestCase):
     def test_standby_after_idle(self):
         emit = EmitRecorder()

@@ -61,6 +61,7 @@ screen.capture (验证结果，必要时重复)
 | `safety.confirmation_resolved` | 已批复 | 关闭确认 UI |
 | `safety.confirmation_expired` | 超时未批（自动拒绝） | 提示已拒绝 |
 | `safety.panic_triggered` / `safety.panic_released` | 急停触发/解除 | 显著提示用户；急停期间禁止再发动作 |
+| `safety.grant_changed` | 授权模式变更（`{from, to, actor, widened}`） | 刷新权限展示；`widened: true` 意味着宿主刚在带外提权，值得记一笔审计日志 |
 
 HTTP 传输下 `GET /events` 提供 SSE 流，会先回放最近 200 条事件再续传（harness 重连不丢上下文）。
 
@@ -81,6 +82,7 @@ server → event action.started → event action.finished
 ```
 
 - 批复响应立即返回，被批准的动作在工作线程上与其他动作串行执行；事件顺序为 `confirmation_resolved` → `action.started` → `action.finished`。
+- 批准后、执行前若授权模式被降级/收回，该动作不会执行，而是发出 `action.finished`（`ok:false`、`error_code:not_authorized`）；宿主应据此刷新权限展示并提示用户。
 - 待批期间新动作一律返回 `busy`（先批复再继续）。
 - 超时（`safety.confirm_timeout_s`，默认 30s）自动拒绝并发出 `confirmation_expired`；之后用旧 id 批复返回 `confirmation_expired` 错误。
 - 批量中任一项需要确认 → **整批**等待一次批复，批准后整批执行（含触发确认的那一项）。
