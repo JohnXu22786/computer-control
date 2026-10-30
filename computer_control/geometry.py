@@ -114,7 +114,8 @@ class Surface:
         """Convert a model-space region {x, y, width, height} to a physical
         (left, top, right, bottom) capture bbox. ``None`` means the full
         desktop. The bbox is clamped to the physical desktop, so out-of-canvas
-        regions degrade to a partial capture instead of an out-of-bounds one."""
+        regions degrade to a partial capture instead of an out-of-bounds one.
+        A region with no intersection raises ``ValueError``."""
         if region is None:
             return (
                 self.physical_x,
@@ -129,13 +130,7 @@ class Surface:
         left, top = max(left, self.physical_x), max(top, self.physical_y)
         right, bottom = min(right, self.physical_x + self.physical_width), min(bottom, self.physical_y + self.physical_height)
         if right <= left or bottom <= top:
-            # region entirely off the desktop: fall back to the full desktop
-            return (
-                self.physical_x,
-                self.physical_y,
-                self.physical_x + self.physical_width,
-                self.physical_y + self.physical_height,
-            )
+            raise ValueError("capture region does not intersect the screen")
         return (
             int(math.floor(left)),
             int(math.floor(top)),
