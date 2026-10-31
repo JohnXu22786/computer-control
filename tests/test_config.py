@@ -58,6 +58,18 @@ class TestFromDict(unittest.TestCase):
         with self.assertRaises(ConfigError):
             from_dict({"capture": {"default_width": 0}})
 
+    def test_non_finite_safety_timeouts_rejected(self):
+        for key in ("confirm_timeout_s", "idle_timeout_s"):
+            for value in (float("nan"), float("inf"), float("-inf")):
+                with self.subTest(key=key, value=value):
+                    with self.assertRaises(ConfigError):
+                        from_dict({"safety": {key: value}})
+
+    def test_finite_safety_timeouts_accepted(self):
+        c = from_dict({"safety": {"confirm_timeout_s": 5.5, "idle_timeout_s": 60}})
+        self.assertEqual(c.safety.confirm_timeout_s, 5.5)
+        self.assertEqual(c.safety.idle_timeout_s, 60)
+
     def test_invalid_hotkey_rejected(self):
         with self.assertRaises(ConfigError):
             from_dict({"safety": {"emergency_hotkey": "not+a+valid+key+name+"}})
