@@ -160,11 +160,11 @@ class Engine:
         canvas_width = max(1, int(round(self._surface.canvas_width * scale)))
         canvas_width, canvas_height = self._fit_max_area(canvas_width, bbox)
         try:
-            payload = self._driver.capture(bbox=bbox, canvas_width=canvas_width,
-                                           canvas_height=canvas_height,
-                                           format=args.get("format") or "png",
-                                           quality=args.get("quality") or 85,
-                                           grayscale=bool(args.get("grayscale")))
+            payload = self._driver.capture_with_dimensions(
+                bbox=bbox, canvas_width=canvas_width, canvas_height=canvas_height,
+                format=args.get("format") or "png",
+                quality=args.get("quality") or 85,
+                grayscale=bool(args.get("grayscale")))
         except DriverError as exc:
             return self._fail(exc.code, exc.message, tool="screen.capture", data=exc.data)
         self._frame += 1

@@ -242,8 +242,12 @@ class WindowsDriver(BaseDriver):
     # ------------------------------------------------------------- capture
 
     def capture(self, bbox: tuple, canvas_width: int, format: str = "png",
-                quality: int = 85, grayscale: bool = False,
-                canvas_height: Optional[int] = None) -> CapturePayload:
+                quality: int = 85, grayscale: bool = False) -> CapturePayload:
+        return self.capture_with_dimensions(bbox, canvas_width, None, format, quality, grayscale)
+
+    def capture_with_dimensions(self, bbox: tuple, canvas_width: int,
+                                canvas_height: Optional[int], format: str = "png",
+                                quality: int = 85, grayscale: bool = False) -> CapturePayload:
         left, top, right, bottom = bbox
         width = max(1, int(right - left))
         height = max(1, int(bottom - top))

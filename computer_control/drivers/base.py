@@ -58,10 +58,27 @@ class BaseDriver(ABC):
 
     @abstractmethod
     def capture(self, bbox: tuple, canvas_width: int, format: str = "png",
-                quality: int = 85, grayscale: bool = False,
-                canvas_height: Optional[int] = None) -> CapturePayload:
+                quality: int = 85, grayscale: bool = False) -> CapturePayload:
         """Capture the physical desktop bbox (left, top, right, bottom),
-        scale it to the requested canvas dimensions, encode it and return."""
+        scale it so its width is ``canvas_width``, encode it and return."""
+
+    def capture_with_dimensions(self, bbox: tuple, canvas_width: int, canvas_height: int,
+                                format: str = "png", quality: int = 85,
+                                grayscale: bool = False) -> CapturePayload:
+        """Capture to explicit dimensions when supported by the driver.
+
+        Legacy drivers implement only ``capture`` and preserve the bbox aspect
+        ratio. They remain usable when that output height matches the requested
+        height; otherwise a bounded-area capture cannot be represented safely.
+        """
+        left, top, right, bottom = bbox
+        expected_height = max(1, int(round((bottom - top) * canvas_width / max(right - left, 1))))
+        if canvas_height != expected_height:
+            raise DriverError(
+                "capture backend cannot fit this region within the configured area cap because it cannot set canvas height",
+                code="backend_unavailable",
+            )
+        return self.capture(bbox, canvas_width, format, quality, grayscale)
 
     # ------------------------------------------------------------- pointer
 

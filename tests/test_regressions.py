@@ -443,6 +443,58 @@ class TestCaptureAreaCap(unittest.TestCase):
         area = result["result"]["width"] * result["result"]["height"]
         self.assertLessEqual(area, cfg.capture.max_area)
 
+    def test_legacy_capture_driver_keeps_working_when_aspect_height_fits(self):
+        from computer_control.drivers.base import BaseDriver, CapturePayload
+        from computer_control.engine import Engine
+        from computer_control.geometry import Surface
+
+        class LegacyCaptureDriver(BaseDriver):
+            capabilities = {"capture": True}
+
+            def capture(self, bbox, canvas_width, format="png", quality=85, grayscale=False):
+                left, top, right, bottom = bbox
+                height = max(1, int(round((bottom - top) * canvas_width / max(right - left, 1))))
+                return CapturePayload(b"capture", canvas_width, height, format)
+
+        cfg = from_dict({"capture": {"max_area": 100_000}})
+        driver = LegacyCaptureDriver()
+        surface = Surface.from_physical(1920, 0, 0, 3840, 2160)
+        emit = EmitRecorder()
+        gate = SafetyGate(cfg.safety, emit=emit, driver_hotkey_probe=lambda keys: False)
+        engine = Engine(driver, surface, gate, emit, lambda: cfg)
+
+        result = engine.run_tool("screen.capture", {"region": {"x": 0, "y": 0, "width": 100, "height": 100}})
+
+        self.assertTrue(result["ok"], result)
+
+    def test_legacy_capture_driver_rejects_unrepresentable_cap_cleanly(self):
+        from computer_control.drivers.base import BaseDriver, CapturePayload
+        from computer_control.engine import Engine
+        from computer_control.geometry import Surface
+
+        class LegacyCaptureDriver(BaseDriver):
+            capabilities = {"capture": True}
+
+            def capture(self, bbox, canvas_width, format="png", quality=85, grayscale=False):
+                left, top, right, bottom = bbox
+                height = max(1, int(round((bottom - top) * canvas_width / max(right - left, 1))))
+                return CapturePayload(b"capture", canvas_width, height, format)
+
+        cfg = from_dict({"capture": {"max_area": 1024}})
+        driver = LegacyCaptureDriver()
+        surface = Surface.from_physical(1920, 0, 0, 3840, 2160)
+        emit = EmitRecorder()
+        gate = SafetyGate(cfg.safety, emit=emit, driver_hotkey_probe=lambda keys: False)
+        engine = Engine(driver, surface, gate, emit, lambda: cfg)
+
+        result = engine.run_tool("screen.capture", {
+            "region": {"x": 0, "y": 0, "width": 1, "height": 1080}
+        })
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "backend_unavailable")
+        self.assertIn("canvas height", result["error"]["message"])
+
     def test_idle_none_emits_once(self):
         cfg = from_dict({"safety": {"idle_timeout_s": 0.1, "idle_action": "none"}})
         emit = EmitRecorder()
