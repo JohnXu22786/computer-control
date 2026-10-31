@@ -50,10 +50,20 @@ class Rect:
         max_y = max(self.y, bottom - 1)
         clamped_x = int(round(min(max(float(x), self.x), max_x)))
         clamped_y = int(round(min(max(float(y), self.y), max_y)))
-        if self.width > 0 and clamped_x >= right:
-            clamped_x = math.ceil(right) - 1
-        if self.height > 0 and clamped_y >= bottom:
-            clamped_y = math.ceil(bottom) - 1
+        if self.width > 0:
+            min_pixel_x = math.ceil(self.x)
+            max_pixel_x = math.ceil(right) - 1
+            if min_pixel_x <= max_pixel_x:
+                clamped_x = min(max(clamped_x, min_pixel_x), max_pixel_x)
+            elif clamped_x >= right:
+                clamped_x = max_pixel_x
+        if self.height > 0:
+            min_pixel_y = math.ceil(self.y)
+            max_pixel_y = math.ceil(bottom) - 1
+            if min_pixel_y <= max_pixel_y:
+                clamped_y = min(max(clamped_y, min_pixel_y), max_pixel_y)
+            elif clamped_y >= bottom:
+                clamped_y = max_pixel_y
         return (
             clamped_x,
             clamped_y,
