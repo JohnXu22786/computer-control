@@ -111,6 +111,7 @@ class StdioClient(_BaseClient):
                     event.set()
 
     def _transact(self, request: dict, timeout: Optional[float]) -> dict:
+        effective_timeout = self._timeout if timeout is None else timeout
         event = threading.Event()
         with self._lock:
             self._pending[request["id"]] = event
@@ -122,11 +123,11 @@ class StdioClient(_BaseClient):
             with self._lock:
                 self._pending.pop(request["id"], None)
             raise ClientError("server process is not running: %s" % exc)
-        if not event.wait(timeout or self._timeout):
+        if not event.wait(effective_timeout):
             with self._lock:
                 self._pending.pop(request["id"], None)
                 self._responses.pop(request["id"], None)
-            raise ClientError("no response within %.1fs" % (timeout or self._timeout))
+            raise ClientError("no response within %.1fs" % effective_timeout)
         with self._lock:
             response = self._responses.pop(request["id"], None)
         if response is None:
@@ -166,11 +167,12 @@ class HttpClient(_BaseClient):
         self._sse_thread.start()
 
     def _transact(self, request: dict, timeout: Optional[float]) -> dict:
+        effective_timeout = self._timeout if timeout is None else timeout
         data = json.dumps(request).encode("utf-8")
         req = urllib.request.Request(self._base_url + "/rpc", data=data,
                                      headers={"Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(req, timeout=timeout or self._timeout) as resp:
+            with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
                 raw = resp.read().decode("utf-8")
                 try:
                     return json.loads(raw)
