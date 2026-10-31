@@ -44,6 +44,21 @@ class TestCapture(unittest.TestCase):
         r2 = engine.run_tool("screen.capture", {})
         self.assertEqual(r2["result"]["frame"], 2)
 
+    def test_scaled_capture_canvas_coordinates_map_to_matching_physical_point(self):
+        engine, driver, _, _, _ = make_engine()
+        result = engine.run_tool("screen.capture", {"scale": 0.5})
+
+        self.assertTrue(result["ok"], result)
+        canvas = result["result"]["canvas"]
+        self.assertEqual(canvas["display_width_px"], 960)
+        self.assertEqual(canvas["display_height_px"], 540)
+        self.assertEqual(canvas["scale"], 4.0)
+
+        click = engine.run_tool("pointer.click", {"x": 480, "y": 270})
+        self.assertTrue(click["ok"], click)
+        moves = [event for event in driver.log() if event["kind"] == "move"]
+        self.assertEqual(moves[-1]["position"], (1920.0, 1080.0))
+
     def test_capture_rejects_non_object_arguments_before_driver_call(self):
         for arguments in ([], None):
             with self.subTest(arguments=arguments):
