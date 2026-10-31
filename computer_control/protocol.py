@@ -127,9 +127,9 @@ class Router:
 
     def handle(self, request: dict) -> Optional[dict]:
         """Handle one parsed request; returns a response dict, or None for
-        notifications (requests without an id). Notifications never receive
+        notifications (requests without an id member). Notifications never receive
         a response, not even for unknown methods."""
-        is_notification = request.get("id") is None
+        is_notification = "id" not in request
         handler = self._handlers.get(request.get("method"))
         if handler is None:
             if is_notification:
