@@ -77,6 +77,12 @@ class TestParseHotkey(unittest.TestCase):
         self.assertEqual(parse_hotkey("ctrl+alt+f12"), ["ctrl", "alt", "f12"])
         self.assertEqual(parse_hotkey("  Ctrl + Shift + Q "), ["ctrl", "shift", "q"])
 
+    def test_numpad_plus_component(self):
+        self.assertEqual(parse_hotkey("ctrl+numpad_+"), ["ctrl", "numpad_+"])
+        self.assertEqual(parse_hotkey("numpad_++ctrl"), ["numpad_+", "ctrl"])
+        with self.assertRaises(UnknownKeyError):
+            parse_hotkey("numpad_\x00")
+
     def test_duplicate_components_rejected(self):
         with self.assertRaises(ValueError):
             parse_hotkey("ctrl+ctrl+q")
