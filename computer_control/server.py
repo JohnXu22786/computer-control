@@ -234,6 +234,11 @@ def make_http_server(router: Router, host: str, port: int):
             try:
                 request = load_request(body)
             except ProtocolError as exc:
+                if _is_notification(body):
+                    self.send_response(204)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 request_id = _extract_valid_request_id(body)
                 self._json_response(400, {"jsonrpc": "2.0", "id": request_id, "error": exc.as_jsonrpc()})
                 return
