@@ -416,6 +416,22 @@ class TestFraming(unittest.TestCase):
         serve_stdio(router, reader, writer)
         self.assertEqual(writer.buffer, b"")
 
+    def test_malformed_notification_gets_no_response(self):
+        router = Router(lambda: Session(emit=lambda t, p=None: None, driver_factory=lambda cfg: NullDriver(enable_a11y=True)))
+        reader = FakeReader([b'{"jsonrpc":"2.0","method":"system.status","params":[]}\n'])
+        writer = FakeWriter()
+        serve_stdio(router, reader, writer)
+        self.assertEqual(writer.buffer, b"")
+
+    def test_explicit_null_id_bad_params_gets_error_response(self):
+        router = Router(lambda: Session(emit=lambda t, p=None: None, driver_factory=lambda cfg: NullDriver(enable_a11y=True)))
+        reader = FakeReader([b'{"jsonrpc":"2.0","id":null,"method":"system.status","params":[]}\n'])
+        writer = FakeWriter()
+        serve_stdio(router, reader, writer)
+        response = json.loads(writer.buffer.decode("utf-8").strip())
+        self.assertIsNone(response["id"])
+        self.assertEqual(response["error"]["code"], -32602)
+
     def test_bad_params_gets_error_response(self):
         router = Router(lambda: Session(emit=lambda t, p=None: None, driver_factory=lambda cfg: NullDriver(enable_a11y=True)))
         reader = FakeReader([b'{"jsonrpc":"2.0","id":3,"method":"tools.call","params":"not-an-object"}\n'])
