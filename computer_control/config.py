@@ -361,6 +361,8 @@ def load_config(path: Optional[str]) -> Config:
 def apply_overrides(base: Config, patch: dict) -> Config:
     """Return a new Config with ``patch`` (raw dict shape) applied on top of
     ``base``. The base config is never mutated."""
+    if not isinstance(patch, dict):
+        raise ConfigError("configuration patch must be an object")
     merged = copy.deepcopy(base.as_dict())
     _deep_merge(merged, patch)
     return from_dict(merged)

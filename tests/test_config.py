@@ -188,6 +188,11 @@ class TestApplyOverrides(unittest.TestCase):
         with self.assertRaises(ConfigError):
             apply_overrides(default_config(), {"capture": {"default_format": "bmp"}})
 
+    def test_apply_overrides_rejects_non_object_patch(self):
+        for patch in ([1], []):
+            with self.subTest(patch=patch), self.assertRaises(ConfigError):
+                apply_overrides(default_config(), patch)
+
 
 if __name__ == "__main__":
     unittest.main()

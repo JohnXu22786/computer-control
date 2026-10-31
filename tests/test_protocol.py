@@ -89,6 +89,28 @@ class TestLifecycle(RouterFixture):
         self.assertFalse(response["result"]["ok"])
         self.assertEqual(response["result"]["error"]["code"], "invalid_config")
 
+    def test_start_non_object_config_returns_invalid_config_without_starting(self):
+        for config in ([1], []):
+            with self.subTest(config=config):
+                response = self.start_session({"config": config})
+
+                self.assertFalse(response["result"]["ok"])
+                self.assertEqual(response["result"]["error"]["code"], "invalid_config")
+                self.assertFalse(self.router._session_cache.started)
+
+    def test_configure_non_object_patch_returns_invalid_config_without_mutation(self):
+        self.start_session()
+        original_width = self.router._session_cache._cfg.capture.default_width
+
+        for patch in ([1], []):
+            with self.subTest(patch=patch):
+                response = self.call("session.configure", {"patch": patch})
+
+                self.assertFalse(response["result"]["ok"])
+                self.assertEqual(response["result"]["error"]["code"], "invalid_config")
+                self.assertTrue(self.router._session_cache.started)
+                self.assertEqual(self.router._session_cache._cfg.capture.default_width, original_width)
+
     def test_unknown_method(self):
         response = self.call("no.such.method")
         self.assertEqual(response["error"]["code"], -32601)
