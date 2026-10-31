@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
@@ -62,6 +63,8 @@ def _expect_float(value, what, section, key, minimum=None, maximum=None):
         raise ConfigError("%s.%s must be a number, got %r" % (section, key, value))
     _expect_type(value, (int, float), "a number", section, key)
     value = float(value)
+    if not math.isfinite(value):
+        raise ConfigError("%s.%s must be finite, got %r" % (section, key, value))
     if minimum is not None and value < minimum:
         raise ConfigError("%s.%s must be >= %s" % (section, key, minimum))
     if maximum is not None and value > maximum:
