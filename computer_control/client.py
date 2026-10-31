@@ -104,8 +104,9 @@ class StdioClient(_BaseClient):
             else:
                 request_id = message.get("id")
                 with self._lock:
-                    self._responses[request_id] = message
                     event = self._pending.pop(request_id, None)
+                    if event is not None:
+                        self._responses[request_id] = message
                 if event is not None:
                     event.set()
 
@@ -124,6 +125,7 @@ class StdioClient(_BaseClient):
         if not event.wait(timeout or self._timeout):
             with self._lock:
                 self._pending.pop(request["id"], None)
+                self._responses.pop(request["id"], None)
             raise ClientError("no response within %.1fs" % (timeout or self._timeout))
         with self._lock:
             response = self._responses.pop(request["id"], None)
