@@ -8,6 +8,7 @@ confirmation flow and the "call before session.start" error path.
 """
 
 import json
+import queue
 import threading
 import time
 import unittest
@@ -140,6 +141,60 @@ class TestRequestIds(unittest.TestCase):
         client = _BaseClient.__new__(_BaseClient)
         ids = {client._next_id() for _ in range(50)}
         self.assertEqual(len(ids), 50)
+
+    def test_stdio_discards_response_after_request_times_out(self):
+        class FakeStdout:
+            def __init__(self):
+                self.lines = queue.Queue()
+                self.eof_read = threading.Event()
+
+            def readline(self):
+                line = self.lines.get(timeout=1)
+                if not line:
+                    self.eof_read.set()
+                return line
+
+            def close(self):
+                pass
+
+        class FakeStdin:
+            def write(self, _payload):
+                pass
+
+            def flush(self):
+                pass
+
+            def close(self):
+                pass
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdout = FakeStdout()
+                self.stdin = FakeStdin()
+
+        from computer_control.client import _BaseClient
+
+        client = StdioClient.__new__(StdioClient)
+        _BaseClient.__init__(client, timeout=0.01)
+        client._process = FakeProcess()
+        client._responses = {}
+        client._pending = {}
+        client._lock = threading.Lock()
+        client._reader = threading.Thread(target=client._read_loop, daemon=True)
+        client._reader.start()
+        request = {"jsonrpc": "2.0", "id": 123, "method": "test"}
+
+        try:
+            with self.assertRaisesRegex(ClientError, "no response within"):
+                client._transact(request, timeout=0.01)
+
+            response = {"jsonrpc": "2.0", "id": 123, "result": {"ok": True}}
+            client._process.stdout.lines.put(json.dumps(response).encode("utf-8") + b"\n")
+            client._process.stdout.lines.put(b"")
+            self.assertTrue(client._process.stdout.eof_read.wait(timeout=1))
+            self.assertEqual(client._responses, {})
+        finally:
+            client._reader.join(timeout=1)
 
 
 class TestEventsTransport(unittest.TestCase):
