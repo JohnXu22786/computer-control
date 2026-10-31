@@ -58,9 +58,10 @@ class BaseDriver(ABC):
 
     @abstractmethod
     def capture(self, bbox: tuple, canvas_width: int, format: str = "png",
-                quality: int = 85, grayscale: bool = False) -> CapturePayload:
+                quality: int = 85, grayscale: bool = False,
+                canvas_height: Optional[int] = None) -> CapturePayload:
         """Capture the physical desktop bbox (left, top, right, bottom),
-        scale it so its width is ``canvas_width``, encode it and return."""
+        scale it to the requested canvas dimensions, encode it and return."""
 
     # ------------------------------------------------------------- pointer
 

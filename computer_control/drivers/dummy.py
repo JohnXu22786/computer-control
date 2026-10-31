@@ -86,10 +86,11 @@ class NullDriver(BaseDriver):
 
     # ------------------------------------------------------------- capture
 
-    def capture(self, bbox, canvas_width, format="png", quality=85, grayscale=False):
+    def capture(self, bbox, canvas_width, format="png", quality=85, grayscale=False, canvas_height=None):
         left, top, right, bottom = bbox
         width = max(1, int(canvas_width))
-        height = max(1, int(round((bottom - top) * width / max(right - left, 1))))
+        height = (max(1, int(round((bottom - top) * width / max(right - left, 1))))
+                  if canvas_height is None else max(1, int(canvas_height)))
         self._record(kind="capture", bbox=(left, top, right, bottom),
                      canvas_width=width, format=format, quality=quality, grayscale=grayscale)
         if format == "jpeg":

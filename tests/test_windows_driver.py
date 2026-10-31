@@ -1,6 +1,7 @@
 """Focused tests for Windows SendInput event construction."""
 
 import unittest
+from PIL import Image
 
 from computer_control.drivers.windows import (
     MOUSEEVENTF_ABSOLUTE,
@@ -27,6 +28,13 @@ class TestWindowsAbsoluteMouse(unittest.TestCase):
                          MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)
         self.assertEqual(mouse.dx, 0)
         self.assertEqual(mouse.dy, round(540 * 65535 / 1079))
+
+    def test_encode_uses_explicit_capture_height(self):
+        driver = WindowsDriver.__new__(WindowsDriver)
+        payload = driver._encode(Image.new("RGB", (2, 2160)), 1, 1024,
+                                 "png", 85, False)
+
+        self.assertEqual((payload.width, payload.height), (1, 1024))
 
 
 if __name__ == "__main__":

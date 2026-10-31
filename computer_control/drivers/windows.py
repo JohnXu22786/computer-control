@@ -241,7 +241,8 @@ class WindowsDriver(BaseDriver):
     # ------------------------------------------------------------- capture
 
     def capture(self, bbox: tuple, canvas_width: int, format: str = "png",
-                quality: int = 85, grayscale: bool = False) -> CapturePayload:
+                quality: int = 85, grayscale: bool = False,
+                canvas_height: Optional[int] = None) -> CapturePayload:
         left, top, right, bottom = bbox
         width = max(1, int(right - left))
         height = max(1, int(bottom - top))
@@ -252,7 +253,7 @@ class WindowsDriver(BaseDriver):
                 image = ImageGrab.grab(bbox=(left, top, right, bottom), all_screens=True)
         except Exception as exc:
             raise DriverError("capture failed: %s" % exc, code="driver_failed")
-        return self._encode(image, canvas_width, format, quality, grayscale)
+        return self._encode(image, canvas_width, canvas_height, format, quality, grayscale)
 
     def _capture_mss(self, left, top, width, height) -> Image.Image:
         import mss
@@ -261,16 +262,17 @@ class WindowsDriver(BaseDriver):
             shot = sct.grab({"left": left, "top": top, "width": width, "height": height})
         return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
 
-    def _encode(self, image: Image.Image, canvas_width: int, format: str,
+    def _encode(self, image: Image.Image, canvas_width: int, canvas_height: Optional[int], format: str,
                 quality: int, grayscale: bool) -> CapturePayload:
         if image.mode != "RGB":
             image = image.convert("RGB")
         if grayscale:
             image = image.convert("L")
-        if image.width != canvas_width:
-            new_height = max(1, int(round(image.height * canvas_width / image.width)))
+        target_height = (max(1, int(round(image.height * canvas_width / image.width)))
+                         if canvas_height is None else canvas_height)
+        if image.size != (canvas_width, target_height):
             resampling = getattr(Image, "Resampling", Image).LANCZOS
-            image = image.resize((canvas_width, new_height), resampling)
+            image = image.resize((canvas_width, target_height), resampling)
         buffer = io.BytesIO()
         if format == "jpeg":
             image.save(buffer, "JPEG", quality=quality)

@@ -386,6 +386,63 @@ class TestCaptureAreaCap(unittest.TestCase):
         area = r["result"]["width"] * r["result"]["height"]
         self.assertLessEqual(area, 100_000)
 
+    def test_max_area_applies_to_narrow_tall_region(self):
+        from computer_control.engine import Engine
+        from computer_control.geometry import Surface
+
+        cfg = from_dict({"capture": {"max_area": 100_000}})
+        driver = NullDriver(enable_a11y=True)
+        surface = Surface.from_physical(1920, 0, 0, 3840, 2160)
+        emit = EmitRecorder()
+        gate = SafetyGate(cfg.safety, emit=emit, driver_hotkey_probe=lambda keys: False)
+        engine = Engine(driver, surface, gate, emit, lambda: cfg)
+
+        result = engine.run_tool("screen.capture", {
+            "region": {"x": 0, "y": 0, "width": 1, "height": 1000}
+        })
+
+        self.assertTrue(result["ok"], result)
+        area = result["result"]["width"] * result["result"]["height"]
+        self.assertLessEqual(area, cfg.capture.max_area)
+
+    def test_max_area_applies_when_region_height_rounds_to_one_pixel(self):
+        from computer_control.engine import Engine
+        from computer_control.geometry import Surface
+
+        cfg = from_dict({"capture": {"max_area": 1024}})
+        driver = NullDriver(enable_a11y=True)
+        surface = Surface.from_physical(1920, 0, 0, 3840, 2160)
+        emit = EmitRecorder()
+        gate = SafetyGate(cfg.safety, emit=emit, driver_hotkey_probe=lambda keys: False)
+        engine = Engine(driver, surface, gate, emit, lambda: cfg)
+
+        result = engine.run_tool("screen.capture", {
+            "region": {"x": 0, "y": 0, "width": 1920, "height": 0.5}
+        })
+
+        self.assertTrue(result["ok"], result)
+        area = result["result"]["width"] * result["result"]["height"]
+        self.assertLessEqual(area, cfg.capture.max_area)
+
+    def test_max_area_caps_extreme_aspect_region_dimensions(self):
+        from computer_control.engine import Engine
+        from computer_control.geometry import Surface
+
+        cfg = from_dict({"capture": {"max_area": 1024}})
+        driver = NullDriver(enable_a11y=True)
+        surface = Surface.from_physical(1920, 0, 0, 3840, 2160)
+        emit = EmitRecorder()
+        gate = SafetyGate(cfg.safety, emit=emit, driver_hotkey_probe=lambda keys: False)
+        engine = Engine(driver, surface, gate, emit, lambda: cfg)
+
+        result = engine.run_tool("screen.capture", {
+            "region": {"x": 0, "y": 0, "width": 1, "height": 1080}
+        })
+
+        self.assertTrue(result["ok"], result)
+        area = result["result"]["width"] * result["result"]["height"]
+        self.assertLessEqual(area, cfg.capture.max_area)
+
     def test_idle_none_emits_once(self):
         cfg = from_dict({"safety": {"idle_timeout_s": 0.1, "idle_action": "none"}})
         emit = EmitRecorder()
