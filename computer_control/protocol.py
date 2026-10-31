@@ -210,7 +210,11 @@ class Router:
         if not isinstance(tool, str) or not tool:
             return {"ok": False, "result": None,
                     "error": {"code": "invalid_arguments", "message": "tool is required"}, "meta": {}}
-        return self._guard(lambda: self._get_session().call(tool, params.get("arguments") or {}), params)
+        arguments = params.get("arguments", {})
+        if not isinstance(arguments, dict):
+            return {"ok": False, "result": None,
+                    "error": {"code": "invalid_arguments", "message": "arguments must be an object"}, "meta": {}}
+        return self._guard(lambda: self._get_session().call(tool, arguments), params)
 
     def _tools_call_batch(self, params):
         items = params.get("items")
