@@ -70,6 +70,12 @@ class RouterFixture(unittest.TestCase):
 
 
 class TestLifecycle(RouterFixture):
+    def test_start_unrepresentable_timeout_returns_invalid_config(self):
+        large_integer = json.loads("1" + "0" * 400)
+        response = self.start_session({"safety": {"confirm_timeout_s": large_integer}})
+        self.assertFalse(response["result"]["ok"])
+        self.assertEqual(response["result"]["error"]["code"], "invalid_config")
+
     def test_unknown_method(self):
         response = self.call("no.such.method")
         self.assertEqual(response["error"]["code"], -32601)

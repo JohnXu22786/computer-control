@@ -62,7 +62,10 @@ def _expect_float(value, what, section, key, minimum=None, maximum=None):
     if isinstance(value, bool):
         raise ConfigError("%s.%s must be a number, got %r" % (section, key, value))
     _expect_type(value, (int, float), "a number", section, key)
-    value = float(value)
+    try:
+        value = float(value)
+    except OverflowError as exc:
+        raise ConfigError("%s.%s must be finite, got %r" % (section, key, value)) from exc
     if not math.isfinite(value):
         raise ConfigError("%s.%s must be finite, got %r" % (section, key, value))
     if minimum is not None and value < minimum:
