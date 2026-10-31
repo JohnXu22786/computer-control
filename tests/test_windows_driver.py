@@ -1,7 +1,10 @@
 """Focused tests for Windows SendInput event construction."""
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
+import computer_control.drivers.windows as windows_module
 from computer_control.drivers.windows import (
     MOUSEEVENTF_ABSOLUTE,
     MOUSEEVENTF_MOVE,
@@ -27,6 +30,22 @@ class TestWindowsAbsoluteMouse(unittest.TestCase):
                          MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)
         self.assertEqual(mouse.dx, 0)
         self.assertEqual(mouse.dy, round(540 * 65535 / 1079))
+
+
+class TestWindowsDpiAwareness(unittest.TestCase):
+    def test_false_context_result_uses_per_monitor_fallback(self):
+        driver = WindowsDriver.__new__(WindowsDriver)
+        driver._user32 = SimpleNamespace(
+            SetProcessDpiAwarenessContext=Mock(return_value=False),
+            SetProcessDPIAware=Mock(return_value=False),
+        )
+        set_process_dpi_awareness = Mock(return_value=0)
+        shcore = SimpleNamespace(SetProcessDpiAwareness=set_process_dpi_awareness)
+
+        with patch.object(windows_module.ctypes, "WinDLL", return_value=shcore, create=True):
+            self.assertEqual(driver._set_dpi_awareness(), "per-monitor")
+
+        set_process_dpi_awareness.assert_called_once_with(2)
 
 
 if __name__ == "__main__":
