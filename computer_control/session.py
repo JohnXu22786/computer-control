@@ -113,16 +113,25 @@ class Session:
             self._started_at = time.time()
             self._action_count = 0
             self._frame_counter = 0
-            self._stop_requested.clear()
-            self._worker_queue = queue.Queue()
-            self._worker = threading.Thread(target=self._worker_loop, name="session-worker", daemon=True)
+            # Each worker keeps the queue and stop signal for its own session.
+            # A previous worker may outlive stop()'s bounded join while an
+            # action is blocked; restarting must not reanimate it or expose
+            # the new session's queue to it.
+            stop_requested = threading.Event()
+            worker_queue = queue.Queue()
+            self._stop_requested = stop_requested
+            self._worker_queue = worker_queue
+            self._worker = threading.Thread(
+                target=self._worker_loop, args=(worker_queue, stop_requested),
+                name="session-worker", daemon=True,
+            )
             self._worker.start()
             # Approved confirmations execute on the worker thread, serialized
             # with every other action.
             def queue_approval(pending):
                 outcome = threading.Event()
                 holder = {"result": None}
-                self._worker_queue.put((lambda: engine._on_confirmation_approved(pending), outcome, holder))
+                worker_queue.put((lambda: engine._on_confirmation_approved(pending), outcome, holder))
 
             gate.on_approved = queue_approval
             gate.on_panic_state = self._on_panic_state
@@ -156,10 +165,12 @@ class Session:
             gate = self._gate
             engine = self._engine
             queue_ = self._worker_queue
+            worker = self._worker
+            stop_requested = self._stop_requested
             self._gate = None
             self._engine = None
             self._driver = None
-            self._stop_requested.set()
+            stop_requested.set()
         gate.suspend()
         gate.close()
         # answer every queued-but-unstarted task immediately
@@ -170,7 +181,6 @@ class Session:
                 break
             holder["result"] = _error("safety_stopped", "session stopped before the action ran")
             outcome.set()
-        worker = self._worker
         in_flight_note = None
         if worker is not None and worker is not threading.current_thread():
             worker.join(timeout=30.0)
@@ -365,10 +375,10 @@ class Session:
 
     # ------------------------------------------------------- worker thread
 
-    def _worker_loop(self) -> None:
-        while not self._stop_requested.is_set():
+    def _worker_loop(self, worker_queue: queue.Queue, stop_requested: threading.Event) -> None:
+        while not stop_requested.is_set():
             try:
-                task = self._worker_queue.get(timeout=0.2)
+                task = worker_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
             run, outcome, holder = task
