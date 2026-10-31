@@ -65,6 +65,13 @@ class TestFromDict(unittest.TestCase):
                     with self.assertRaises(ConfigError):
                         from_dict({"safety": {key: value}})
 
+    def test_unrepresentable_safety_timeout_integers_rejected(self):
+        large_integer = json.loads("1" + "0" * 400)
+        for key in ("confirm_timeout_s", "idle_timeout_s"):
+            with self.subTest(key=key):
+                with self.assertRaises(ConfigError):
+                    from_dict({"safety": {key: large_integer}})
+
     def test_finite_safety_timeouts_accepted(self):
         c = from_dict({"safety": {"confirm_timeout_s": 5.5, "idle_timeout_s": 60}})
         self.assertEqual(c.safety.confirm_timeout_s, 5.5)
