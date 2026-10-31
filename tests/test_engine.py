@@ -44,6 +44,16 @@ class TestCapture(unittest.TestCase):
         r2 = engine.run_tool("screen.capture", {})
         self.assertEqual(r2["result"]["frame"], 2)
 
+    def test_capture_rejects_non_object_arguments_before_driver_call(self):
+        for arguments in ([], None):
+            with self.subTest(arguments=arguments):
+                engine, driver, _, _, _ = make_engine()
+                result = engine.run_tool("screen.capture", arguments)
+
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"]["code"], "invalid_arguments")
+                self.assertFalse(any(event["kind"] == "capture" for event in driver.log()))
+
     def test_capture_region_maps_through_surface(self):
         engine, driver, _, _, _ = make_engine()
         engine.run_tool("screen.capture", {"region": {"x": 100, "y": 50, "width": 10, "height": 20}})
