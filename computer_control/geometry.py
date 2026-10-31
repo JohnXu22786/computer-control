@@ -44,11 +44,29 @@ class Rect:
         return self.x <= x < self.x + self.width and self.y <= y < self.y + self.height
 
     def clamp_point(self, x: float, y: float) -> Tuple[int, int]:
-        max_x = max(self.x, self.x + self.width - 1)
-        max_y = max(self.y, self.y + self.height - 1)
+        right = self.x + self.width
+        bottom = self.y + self.height
+        max_x = max(self.x, right - 1)
+        max_y = max(self.y, bottom - 1)
+        clamped_x = int(round(min(max(float(x), self.x), max_x)))
+        clamped_y = int(round(min(max(float(y), self.y), max_y)))
+        if self.width > 0:
+            min_pixel_x = math.ceil(self.x)
+            max_pixel_x = math.ceil(right) - 1
+            if min_pixel_x <= max_pixel_x:
+                clamped_x = min(max(clamped_x, min_pixel_x), max_pixel_x)
+            elif clamped_x >= right:
+                clamped_x = max_pixel_x
+        if self.height > 0:
+            min_pixel_y = math.ceil(self.y)
+            max_pixel_y = math.ceil(bottom) - 1
+            if min_pixel_y <= max_pixel_y:
+                clamped_y = min(max(clamped_y, min_pixel_y), max_pixel_y)
+            elif clamped_y >= bottom:
+                clamped_y = max_pixel_y
         return (
-            int(round(min(max(float(x), self.x), max_x))),
-            int(round(min(max(float(y), self.y), max_y))),
+            clamped_x,
+            clamped_y,
         )
 
 
