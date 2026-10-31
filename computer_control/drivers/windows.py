@@ -216,11 +216,18 @@ class WindowsDriver(BaseDriver):
         return "pillow"
 
     def _probe_uia(self) -> bool:
+        bridge = None
         try:
             bridge = self._uia_bridge()
             return bridge.available
         except Exception:
             return False
+        finally:
+            if bridge is not None:
+                try:
+                    bridge.close()
+                except Exception:
+                    pass
 
     def _uia_bridge(self):
         from computer_control.a11y.windows_uia import UiaBridge
@@ -232,12 +239,21 @@ class WindowsDriver(BaseDriver):
 
     def close(self):
         with self._uia_lock:
-            if self._uia is not None:
-                try:
-                    self._uia.close()
-                except Exception:
-                    pass
-                self._uia = None
+            bridge = self._uia
+        if bridge is not None:
+            try:
+                bridge.close()
+            except Exception:
+                pass
+
+    def close_worker(self):
+        with self._uia_lock:
+            bridge = self._uia
+        if bridge is not None:
+            try:
+                bridge.close()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------- capture
 

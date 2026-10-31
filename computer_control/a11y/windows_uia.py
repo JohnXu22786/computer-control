@@ -38,37 +38,64 @@ CONTROL_TYPE_NAMES = {
 }
 
 
-class UiaBridge:
-    """Lazy COM client. Create it any time; it only touches COM on first use."""
+class _UiaThreadState:
+    """COM apartment state owned and released by its creating thread."""
 
     def __init__(self):
-        self._auto = None
-        self._module = None
-        self._nodes = {}
+        self.auto = None
+        self.module = None
+        self.nodes = {}
+        self.init_error = None
+        self._co_uninitialize = None
+
+    def close(self):
+        self.nodes.clear()
+        self.auto = None
+        self.module = None
+        uninitialize = self._co_uninitialize
+        self._co_uninitialize = None
+        if uninitialize is not None:
+            uninitialize()
+
+
+class UiaBridge:
+    """Lazy COM client with automation and elements scoped to each thread."""
+
+    def __init__(self):
+        self._thread_state = threading.local()
         self._lock = threading.RLock()
         self._walk_cap = 5000
-        self._init_error = None
+
+    def _state(self):
+        if not hasattr(self._thread_state, "state"):
+            self._thread_state.state = _UiaThreadState()
+        return self._thread_state.state
 
     # ------------------------------------------------------------ lifecycle
 
     def _ensure(self):
-        if self._auto is not None:
+        state = self._state()
+        if state.auto is not None:
             return True
-        if self._init_error is not None:
+        if state.init_error is not None:
             return False
         try:
             import comtypes
+
+            if state._co_uninitialize is None:
+                comtypes.CoInitialize()
+                state._co_uninitialize = comtypes.CoUninitialize
             import comtypes.client
 
             comtypes.client.GetModule("UIAutomationCore.dll")
             import comtypes.gen.UIAutomationClient as uia_gen
 
             auto = self._create_automation(comtypes, uia_gen)
-            self._auto = auto
-            self._module = uia_gen
+            state.auto = auto
+            state.module = uia_gen
             return True
         except Exception as exc:  # pragma: no cover - environment dependent
-            self._init_error = str(exc)
+            state.init_error = str(exc)
             return False
 
     @staticmethod
@@ -91,17 +118,17 @@ class UiaBridge:
         return self._ensure()
 
     def _require(self):
+        state = self._state()
         if not self._ensure():
             raise DriverError(
                 "Windows UI Automation is unavailable (%s); install the optional "
-                "'comtypes' dependency and ensure an interactive desktop session" % self._init_error,
+                "'comtypes' dependency and ensure an interactive desktop session" % state.init_error,
                 code="backend_unavailable",
             )
-        return self._auto, self._module
+        return state.auto, state.module
 
     def close(self):
-        self._nodes.clear()
-        self._auto = None
+        self._state().close()
 
     # ------------------------------------------------------------- snapshot
 
@@ -113,8 +140,9 @@ class UiaBridge:
             except Exception as exc:
                 raise DriverError("cannot reach the UIA root element: %s" % exc, code="backend_unavailable")
 
+            state = self._state()
             self._walk_cap = options.get("hard_walk_cap", 5000)
-            self._nodes = {}
+            state.nodes = {}
             next_id = {"value": 1}
 
             def walk(element, budget):
@@ -137,7 +165,7 @@ class UiaBridge:
                 node["id"] = next_id["value"]
                 next_id["value"] += 1
                 budget["remaining"] -= 1
-                self._nodes[node["id"]] = element
+                state.nodes[node["id"]] = element
 
                 try:
                     condition = auto.CreateTrueCondition()
@@ -175,7 +203,7 @@ class UiaBridge:
 
     def _element(self, node_id: int):
         with self._lock:
-            element = self._nodes.get(node_id)
+            element = self._state().nodes.get(node_id)
         if element is None:
             raise DriverError(
                 "element %s is not part of the current snapshot" % node_id,
