@@ -97,6 +97,15 @@ class TestValidation(unittest.TestCase):
         with self.assertRaises(ValidationError):
             clean_arguments("keyboard.combo", {"keys": []})
 
+    def test_combo_string_accepts_numpad_plus_key(self):
+        args = clean_arguments("keyboard.combo", {"keys": "ctrl+numpad_+"})
+        self.assertEqual(args["keys"], ["ctrl", "numpad_+"])
+
+    def test_combo_string_rejects_malformed_or_unknown_keys(self):
+        for keys in ("ctrl++q", "ctrl+notakey"):
+            with self.subTest(keys=keys), self.assertRaises(ValidationError):
+                clean_arguments("keyboard.combo", {"keys": keys})
+
     def test_key_names_validated(self):
         with self.assertRaises(ValidationError):
             clean_arguments("keyboard.press", {"key": "hyper"})
