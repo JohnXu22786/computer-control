@@ -9,6 +9,8 @@ from computer_control.drivers.base import DriverError
 import computer_control.drivers.windows as windows_module
 from computer_control.drivers.windows import (
     MOUSEEVENTF_ABSOLUTE,
+    MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP,
     MOUSEEVENTF_MOVE,
     MOUSEEVENTF_VIRTUALDESK,
     WindowsDriver,
@@ -61,6 +63,80 @@ class TestWindowsKeyCombo(unittest.TestCase):
 
         self.assertIs(raised.exception, release_error)
         self.assertEqual(released, [ord("A"), 0x10, 0x11, 0x10])
+
+
+class TestWindowsInputRelease(unittest.TestCase):
+    def test_key_press_retries_one_shot_key_up_failure(self):
+        driver = WindowsDriver.__new__(WindowsDriver)
+        release_error = DriverError("key release failed")
+        releases = []
+
+        driver._key_down = Mock()
+
+        def key_up(vk, extended=False):
+            releases.append((vk, extended))
+            if len(releases) == 1:
+                raise release_error
+
+        driver._key_up = key_up
+
+        with patch.object(windows_module.time, "sleep"):
+            with self.assertRaises(DriverError) as raised:
+                driver.key_press("a")
+
+        self.assertIs(raised.exception, release_error)
+        self.assertEqual(len(releases), 2)
+        driver._key_down.assert_called_once_with(ord("A"), False)
+
+    def test_pointer_click_retries_one_shot_mouse_up_failure(self):
+        driver = WindowsDriver.__new__(WindowsDriver)
+        release_error = DriverError("mouse release failed")
+        sent_flags = []
+
+        def send_mouse(flags, **kwargs):
+            sent_flags.append(flags)
+            if flags == MOUSEEVENTF_LEFTUP and sent_flags.count(flags) == 1:
+                raise release_error
+
+        driver._send_mouse = send_mouse
+
+        with patch.object(windows_module.time, "sleep"):
+            with self.assertRaises(DriverError) as raised:
+                driver.pointer_click("left")
+
+        self.assertIs(raised.exception, release_error)
+        self.assertEqual(sent_flags, [MOUSEEVENTF_LEFTDOWN,
+                                      MOUSEEVENTF_LEFTUP,
+                                      MOUSEEVENTF_LEFTUP])
+
+    def test_pointer_drag_failure_releases_button_and_preserves_action_error(self):
+        driver = WindowsDriver.__new__(WindowsDriver)
+        action_error = DriverError("pointer move failed")
+        cleanup_error = DriverError("mouse release failed")
+        sent_flags = []
+        moves = []
+
+        def pointer_move(*args, **kwargs):
+            moves.append(args)
+            if len(moves) == 2:
+                raise action_error
+
+        def send_mouse(flags, **kwargs):
+            sent_flags.append(flags)
+            if flags == MOUSEEVENTF_LEFTUP:
+                raise cleanup_error
+
+        driver.pointer_move = pointer_move
+        driver._send_mouse = send_mouse
+
+        with patch.object(windows_module.time, "sleep"):
+            with self.assertRaises(DriverError) as raised:
+                driver.pointer_drag(1, 2, 3, 4)
+
+        self.assertIs(raised.exception, action_error)
+        self.assertEqual(sent_flags, [MOUSEEVENTF_LEFTDOWN,
+                                      MOUSEEVENTF_LEFTUP,
+                                      MOUSEEVENTF_LEFTUP])
 
 
 class TestWindowsUiaProbe(unittest.TestCase):

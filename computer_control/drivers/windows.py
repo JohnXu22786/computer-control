@@ -332,15 +332,34 @@ class WindowsDriver(BaseDriver):
         inp.mi = _MOUSEINPUT(norm_x, norm_y, data & 0xFFFFFFFF, flags, 0, 0)
         self._send_input(inp)
 
+    @staticmethod
+    def _release_with_retry(release) -> None:
+        """Retry a failed release once while preserving its first error."""
+        try:
+            release()
+        except Exception as exc:
+            try:
+                release()
+            except Exception:
+                pass
+            raise exc
+
     def pointer_click(self, button: str, times: int = 1, hold_ms: int = 0) -> None:
         down, up = _BUTTON_FLAGS.get(button, _BUTTON_FLAGS["left"])
         for i in range(max(1, int(times))):
             self._send_mouse(down)
-            if hold_ms > 0:
-                time.sleep(hold_ms / 1000.0)
-            else:
-                time.sleep(0.01)
-            self._send_mouse(up)
+            try:
+                if hold_ms > 0:
+                    time.sleep(hold_ms / 1000.0)
+                else:
+                    time.sleep(0.01)
+            except Exception:
+                try:
+                    self._release_with_retry(lambda: self._send_mouse(up))
+                except Exception:
+                    pass
+                raise
+            self._release_with_retry(lambda: self._send_mouse(up))
             if i + 1 < max(1, int(times)):
                 time.sleep(0.06)
 
@@ -350,11 +369,18 @@ class WindowsDriver(BaseDriver):
         self.pointer_move(fx, fy, steps=4)
         time.sleep(0.02)
         self._send_mouse(down)
-        time.sleep(0.02)
-        self.pointer_move(tx, ty, steps=max(1, int(steps)))
-        if hold_ms > 0:
-            time.sleep(hold_ms / 1000.0)
-        self._send_mouse(up)
+        try:
+            time.sleep(0.02)
+            self.pointer_move(tx, ty, steps=max(1, int(steps)))
+            if hold_ms > 0:
+                time.sleep(hold_ms / 1000.0)
+        except Exception:
+            try:
+                self._release_with_retry(lambda: self._send_mouse(up))
+            except Exception:
+                pass
+            raise
+        self._release_with_retry(lambda: self._send_mouse(up))
 
     def pointer_scroll(self, axis: str, amount: float) -> None:
         delta = int(round(amount * WHEEL_DELTA))
@@ -407,8 +433,15 @@ class WindowsDriver(BaseDriver):
     def key_press(self, key_name: str) -> None:
         vk, extended = parse_key_full(key_name)
         self._key_down(vk, extended)
-        time.sleep(0.02)
-        self._key_up(vk, extended)
+        try:
+            time.sleep(0.02)
+        except Exception:
+            try:
+                self._release_with_retry(lambda: self._key_up(vk, extended))
+            except Exception:
+                pass
+            raise
+        self._release_with_retry(lambda: self._key_up(vk, extended))
 
     def key_combo(self, key_names: List[str]) -> None:
         """Press every key down in order, release in reverse. If any key
