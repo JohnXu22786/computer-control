@@ -135,15 +135,17 @@ def serve_stdio(router: Router, stdin, stdout, stop_event: Optional[threading.Ev
             request = load_request(line)
             response = router.handle(request)
         except ProtocolError as exc:
-            # Parse/invalid-request failures: respond with the request's id if available,
-            # or null id per JSON-RPC 2.0 specification.
-            request_id = _extract_valid_request_id(line)
-            response = {"jsonrpc": "2.0", "id": request_id, "error": exc.as_jsonrpc()}
+            if not _is_notification(line):
+                # Parse/invalid-request failures: respond with the request's id if available,
+                # or null id per JSON-RPC 2.0 specification.
+                request_id = _extract_valid_request_id(line)
+                response = {"jsonrpc": "2.0", "id": request_id, "error": exc.as_jsonrpc()}
         except Exception as exc:
             log("unhandled error: %s\n%s" % (exc, _stack()))
-            request_id = _extract_valid_request_id(line)
-            response = {"jsonrpc": "2.0", "id": request_id,
-                        "error": {"code": -32603, "message": "internal error: %s" % exc}}
+            if not _is_notification(line):
+                request_id = _extract_valid_request_id(line)
+                response = {"jsonrpc": "2.0", "id": request_id,
+                            "error": {"code": -32603, "message": "internal error: %s" % exc}}
         if response is not None:
             try:
                 stdout.write(json.dumps(response).encode("utf-8") + b"\n")
@@ -171,6 +173,21 @@ def _extract_valid_request_id(body: bytes):
     if isinstance(request_id, float) and not math.isfinite(request_id):
         return None
     return request_id
+
+
+def _is_notification(body: bytes) -> bool:
+    """Return whether a JSON-RPC request-shaped object has no ID member."""
+    try:
+        request = json.loads(body.decode("utf-8"))
+    except Exception:
+        return False
+    return (
+        isinstance(request, dict)
+        and "id" not in request
+        and request.get("jsonrpc") == "2.0"
+        and isinstance(request.get("method"), str)
+        and bool(request["method"])
+    )
 
 
 def _stack() -> str:
