@@ -77,9 +77,13 @@ stdio protocol — the Python core is left untouched. Profile-level settings can
 be pinned through the patch row's `config` (e.g. `platform.name: dry-run` for a
 rehearsal-only install).
 
-Requirements for the bridge: `node >= 18` and a Python 3.9+ interpreter with
-this package installed (`pip install -r requirements.txt` is enough for the
-core tools).
+Requirements for the bridge: `node >= 18` and Python 3.9+. Install this
+package and its core dependencies into the Python environment used by dsh; this
+works from any directory:
+
+```bash
+python -m pip install git+https://github.com/JohnXu22786/computer-control.git
+```
 
 ## Installation
 
@@ -87,7 +91,7 @@ Requirements: **Python 3.9+**, Windows 10/11 (full functionality); other platfor
 
 ```powershell
 # Core (screenshot + input injection)
-pip install -r requirements.txt
+python -m pip install .
 
 # Optional capabilities (recommended):
 #   comtypes  -> accessibility-tree (UIA) semantic actions

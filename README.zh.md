@@ -73,7 +73,11 @@ dsh plugin --profile demo remove computer-control
 `python -m computer_control serve`，把 `manifest.json` 中声明的全部工具经 stdio 协议重新暴露给 harness——
 Python 核心保持不变。profile 级设置可通过 patch 行的 `config` 固定（例如 `platform.name: dry-run` 实现只演练安装）。
 
-桥接层要求：`node >= 18`，且环境中装有 Python 3.9+ 并安装本包（核心工具只需 `pip install -r requirements.txt`）。
+桥接层要求：`node >= 18` 和 Python 3.9+。请将本包及其核心依赖安装到 dsh 使用的 Python 环境中；以下命令可在任意目录运行：
+
+```bash
+python -m pip install git+https://github.com/JohnXu22786/computer-control.git
+```
 
 ## 安装
 
@@ -81,7 +85,7 @@ Python 核心保持不变。profile 级设置可通过 patch 行的 `config` 固
 
 ```powershell
 # 核心（截图 + 输入注入）
-pip install -r requirements.txt
+python -m pip install .
 
 # 可选能力（推荐）：
 #   comtypes  -> 可访问性树（UIA）语义操作
