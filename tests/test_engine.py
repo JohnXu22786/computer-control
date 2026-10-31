@@ -215,6 +215,17 @@ class TestErrors(unittest.TestCase):
 
 
 class TestConfirmation(unittest.TestCase):
+    def test_padded_win_alias_requires_confirmation_at_default_threshold(self):
+        engine, driver, _, emit, _ = make_engine()
+
+        result = engine.run_tool("keyboard.combo", {"keys": [" WIN ", "r"]})
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+        self.assertEqual(result["result"]["risk"], "high")
+        self.assertIn("safety.confirmation_requested", emit.types())
+        self.assertEqual([e for e in driver.log() if e["kind"] == "combo"], [])
+
     def test_awaiting_confirmation_then_approve(self):
         engine, driver, gate, emit, _ = make_engine({"safety": {"confirm_threshold": "moderate"}})
         r = engine.run_tool("keyboard.combo", {"keys": ["win", "r"]})
