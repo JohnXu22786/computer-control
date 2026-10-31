@@ -14,7 +14,7 @@
 | `scale` | float | 1.0 | 画布相对缩放 0.1-1.0，越小越省 token |
 | `grayscale` | bool | false | 灰度化以省 token |
 
-返回：`frame`（单调递增帧号）、`width/height`、`bytes`、`data_url`、`canvas`。
+返回：`frame`（单调递增帧号）、`width/height`、`bytes`、`data_url`、`canvas`。`canvas` 描述返回图像的实际尺寸；后续指针坐标按该图像画布映射到对应的物理区域，包括 `scale` 缩放和区域截图。
 
 示例：`{"region": {"x": 0, "y": 0, "width": 400, "height": 300}, "format": "jpeg", "scale": 0.5}`
 
