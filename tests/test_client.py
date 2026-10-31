@@ -11,6 +11,7 @@ import json
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from computer_control.client import ClientError, HttpClient, StdioClient
 
@@ -198,6 +199,114 @@ class TestHttpClient(unittest.TestCase):
         self.assertTrue(client._sse_thread.is_alive())
         client.close()
         self.assertFalse(client._sse_thread.is_alive())
+
+    def test_http_client_retries_failed_sse_connection(self):
+        import urllib.error
+
+        class EventResponse:
+            def __init__(self):
+                self.data = iter(b'data: {"type": "reconnected"}\n\n')
+                self.fp = self
+
+            def read(self, size):
+                return bytes([next(self.data)]) if self.data else b""
+
+            def close(self):
+                pass
+
+        attempts = []
+
+        def open_events(*args, **kwargs):
+            attempts.append(None)
+            if len(attempts) == 1:
+                raise urllib.error.URLError("not ready")
+            return EventResponse()
+
+        client = None
+        try:
+            with patch("computer_control.client.urllib.request.urlopen", side_effect=open_events):
+                client = HttpClient("http://example.test", timeout=1)
+                self.assertEqual(client.events(timeout=2)["type"], "reconnected")
+                self.assertGreaterEqual(len(attempts), 2)
+        finally:
+            if client is not None:
+                client.close()
+
+    def test_http_client_retries_sse_read_failure(self):
+        class EventResponse:
+            def __init__(self, fail_first_read=False):
+                self.data = iter(b'data: {"type": "resumed"}\n\n')
+                self.fail_first_read = fail_first_read
+                self.fp = self
+
+            def read(self, size):
+                if self.fail_first_read:
+                    self.fail_first_read = False
+                    raise OSError("stream dropped")
+                return bytes([next(self.data)]) if self.data else b""
+
+            def close(self):
+                pass
+
+        attempts = []
+
+        def open_events(*args, **kwargs):
+            attempts.append(None)
+            return EventResponse(fail_first_read=len(attempts) == 1)
+
+        client = None
+        try:
+            with patch("computer_control.client.urllib.request.urlopen", side_effect=open_events):
+                client = HttpClient("http://example.test", timeout=1)
+                self.assertEqual(client.events(timeout=2)["type"], "resumed")
+                self.assertGreaterEqual(len(attempts), 2)
+        finally:
+            if client is not None:
+                client.close()
+
+    def test_http_client_close_stops_sse_retries(self):
+        import urllib.error
+
+        attempts = []
+
+        def open_events(*args, **kwargs):
+            attempts.append(None)
+            raise urllib.error.URLError("not ready")
+
+        with patch("computer_control.client.urllib.request.urlopen", side_effect=open_events):
+            client = HttpClient("http://example.test", timeout=1)
+            self.assertTrue(wait_for(lambda: len(attempts) >= 2))
+            client.close()
+            count_at_close = len(attempts)
+            time.sleep(0.3)
+            self.assertEqual(len(attempts), count_at_close)
+            self.assertFalse(client._sse_thread.is_alive())
+
+    def test_http_client_close_during_connection_attempt(self):
+        from computer_control.client import HttpClient
+
+        opening = threading.Event()
+
+        class EventResponse:
+            def __init__(self):
+                self.fp = self
+
+            def close(self):
+                pass
+
+        def open_events(*args, **kwargs):
+            self.assertEqual(kwargs["timeout"], 1.0)
+            opening.set()
+            time.sleep(0.2)  # Simulate an in-flight connection attempt.
+            return EventResponse()
+
+        with patch("computer_control.client.urllib.request.urlopen", side_effect=open_events):
+            client = HttpClient("http://example.test", timeout=1)
+            self.assertTrue(opening.wait(1))
+            started = time.monotonic()
+            client.close()
+            self.assertLess(time.monotonic() - started, 1.5)
+            self.assertFalse(client._sse_thread.is_alive())
 
     def test_http_client_connection_failure_raises_client_error(self):
         # Port 1 is almost certainly closed/unreachable
