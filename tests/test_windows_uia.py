@@ -7,6 +7,7 @@ import unittest
 from unittest import mock
 
 from computer_control.a11y.windows_uia import UiaBridge
+from computer_control.drivers.base import DriverError
 
 
 class _ElementCollection:
@@ -97,6 +98,70 @@ class TestUiaThreadOwnership(unittest.TestCase):
         self.assertEqual(created_on, [threading.get_ident(), worker_thread_id[0]])
         self.assertEqual(initialized_on, [threading.get_ident(), worker_thread_id[0]])
         self.assertEqual(sorted(uninitialized_on), sorted([threading.get_ident(), worker_thread_id[0]]))
+
+
+class TestUiaActivationMethods(unittest.TestCase):
+    def _bridge_with_bounded_element(self):
+        bridge = UiaBridge()
+        bridge._require = mock.Mock(return_value=(object(), object()))
+        bridge._element = mock.Mock(return_value=object())
+        bridge._center_of = mock.Mock(return_value={"x": 12.0, "y": 34.0})
+        return bridge
+
+    def test_pattern_mode_does_not_fall_back_to_pointer(self):
+        bridge = self._bridge_with_bounded_element()
+        bridge._invoke_patterns = mock.Mock(return_value=None)
+
+        with self.assertRaises(DriverError) as raised:
+            bridge.activate(7, method="pattern")
+
+        self.assertEqual(raised.exception.code, "pattern_unavailable")
+        bridge._invoke_patterns.assert_called_once()
+
+    def test_pointer_skips_patterns_and_auto_keeps_pointer_fallback(self):
+        bridge = self._bridge_with_bounded_element()
+        bridge._invoke_patterns = mock.Mock(return_value=None)
+
+        pointer = bridge.activate(7, method="pointer")
+
+        self.assertEqual(pointer["method_used"], "pointer")
+        bridge._invoke_patterns.assert_not_called()
+
+        automatic = bridge.activate(7, method="auto")
+
+        self.assertEqual(automatic["method_used"], "pointer")
+        bridge._invoke_patterns.assert_called_once()
+
+    def test_pattern_mode_reports_supported_pattern_failure(self):
+        bridge = self._bridge_with_bounded_element()
+        pattern = mock.Mock()
+        pattern.value = pattern
+        pattern.QueryInterface.return_value = pattern
+        pattern.Invoke.side_effect = RuntimeError("invoke failed")
+        element = mock.Mock()
+
+        def get_current_pattern(pattern_id):
+            if pattern_id == 10000:
+                return pattern
+            raise RuntimeError("pattern unavailable")
+
+        element.GetCurrentPattern.side_effect = get_current_pattern
+        bridge._element.return_value = element
+        module = types.SimpleNamespace(
+            IUIAutomationInvokePattern=object(),
+            IUIAutomationTogglePattern=object(),
+            IUIAutomationSelectionItemPattern=object(),
+        )
+        bridge._require.return_value = (object(), module)
+
+        with self.assertRaises(DriverError) as raised:
+            bridge.activate(7, method="pattern")
+
+        self.assertEqual(raised.exception.code, "pattern_activation_failed")
+
+        automatic = bridge.activate(7, method="auto")
+
+        self.assertEqual(automatic["method_used"], "pointer")
 
 
 if __name__ == "__main__":
