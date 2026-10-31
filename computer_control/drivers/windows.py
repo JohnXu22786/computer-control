@@ -428,9 +428,30 @@ class WindowsDriver(BaseDriver):
                 except Exception:
                     pass
             raise
-        for vk, extended in reversed(resolved):
-            self._key_up(vk, extended)
-            time.sleep(0.015)
+        release_error = None
+        failed_releases = []
+        for vk, extended in reversed(pressed):
+            try:
+                self._key_up(vk, extended)
+            except Exception as exc:
+                if release_error is None:
+                    release_error = exc
+                failed_releases.append((vk, extended))
+            else:
+                time.sleep(0.015)
+
+        # A failed SendInput may leave that key down, so retry failed releases
+        # once after attempting the rest of the chord.
+        for vk, extended in failed_releases:
+            try:
+                self._key_up(vk, extended)
+            except Exception:
+                pass
+            else:
+                time.sleep(0.015)
+
+        if release_error is not None:
+            raise release_error
 
     def key_type(self, text: str, interval_ms: int = 0) -> None:
         interval = max(0, int(interval_ms)) / 1000.0

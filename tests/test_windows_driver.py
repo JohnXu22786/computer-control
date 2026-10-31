@@ -5,6 +5,7 @@ from PIL import Image
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from computer_control.drivers.base import DriverError
 import computer_control.drivers.windows as windows_module
 from computer_control.drivers.windows import (
     MOUSEEVENTF_ABSOLUTE,
@@ -38,6 +39,28 @@ class TestWindowsAbsoluteMouse(unittest.TestCase):
                                  "png", 85, False)
 
         self.assertEqual((payload.width, payload.height), (1, 1024))
+
+
+class TestWindowsKeyCombo(unittest.TestCase):
+    def test_key_up_failure_retries_and_releases_remaining_keys(self):
+        driver = WindowsDriver.__new__(WindowsDriver)
+        released = []
+        release_error = DriverError("release failed")
+
+        def key_up(vk, extended=False):
+            released.append(vk)
+            if vk == 0x10 and released.count(vk) == 1:
+                raise release_error
+
+        driver._key_down = Mock()
+        driver._key_up = key_up
+
+        with patch.object(windows_module.time, "sleep"):
+            with self.assertRaises(DriverError) as raised:
+                driver.key_combo(["ctrl", "shift", "a"])
+
+        self.assertIs(raised.exception, release_error)
+        self.assertEqual(released, [ord("A"), 0x10, 0x11, 0x10])
 
 
 class TestWindowsUiaProbe(unittest.TestCase):
