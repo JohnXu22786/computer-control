@@ -200,11 +200,11 @@ class NullDriver(BaseDriver):
             "id": 1, "role": "window", "name": "Fake Application", "rect": [0, 0, 800, 600],
             "children": [
                 {"id": 2, "role": "edit", "name": "Search box", "rect": [10, 10, 200, 28]},
-                {"id": 3, "role": "button", "name": "Go", "rect": [220, 10, 60, 28]},
+                {"id": 3, "role": "button", "name": "Go", "rect": [220, 10, 280, 38]},
                 {"id": 4, "role": "list", "name": "Results",
                  "children": [
-                     {"id": 5, "role": "listitem", "name": "Result one", "rect": [10, 50, 300, 20]},
-                     {"id": 6, "role": "listitem", "name": "Result two", "rect": [10, 72, 300, 20]},
+                     {"id": 5, "role": "listitem", "name": "Result one", "rect": [10, 50, 310, 70]},
+                     {"id": 6, "role": "listitem", "name": "Result two", "rect": [10, 72, 310, 92]},
                  ]},
             ],
         }
