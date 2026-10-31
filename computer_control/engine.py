@@ -9,6 +9,7 @@ the same event stream.
 from __future__ import annotations
 
 import base64
+import copy
 import threading
 import time
 from typing import Callable, List, Optional
@@ -90,7 +91,7 @@ class Engine:
             return
         plan, _, _ = self._build_batch_plan(args.get("items") or [])
         pending.payload = {
-            "items": plan,
+            "items": copy.deepcopy(plan),
             "continue_on_error": bool(args.get("continue_on_error")),
             "gap_ms": args.get("gap_ms"),
         }
@@ -407,7 +408,7 @@ class Engine:
                 pending = self._gate.pending_confirmation()
                 if pending is not None:
                     pending.payload = {
-                        "items": plan,
+                        "items": copy.deepcopy(plan),
                         "continue_on_error": continue_on_error,
                         "gap_ms": gap_ms,
                     }

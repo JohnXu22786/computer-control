@@ -300,6 +300,34 @@ class TestWait(unittest.TestCase):
 
 
 class TestBatch(unittest.TestCase):
+    def test_batch_confirmation_uses_snapshot_of_nested_caller_arguments(self):
+        engine, driver, gate, _, _ = make_engine({"safety": {"confirm_threshold": "moderate"}})
+        keys = ["win", "r"]
+        items = [{"tool": "keyboard.combo", "arguments": {"keys": keys}}]
+
+        result = engine.run_tool("batch.execute", {"items": items})
+        self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+        keys[:] = ["ctrl", "c"]
+
+        gate.resolve(result["result"]["request_id"], approve=True)
+
+        combos = [event for event in driver.log() if event["kind"] == "combo"]
+        self.assertEqual(combos, [{"kind": "combo", "keys": ["win", "r"]}])
+
+    def test_direct_batch_confirmation_uses_snapshot_of_nested_arguments(self):
+        engine, driver, gate, _, _ = make_engine({"safety": {"confirm_threshold": "moderate"}})
+        keys = ["win", "r"]
+        items = [{"tool": "keyboard.combo", "arguments": {"keys": keys}}]
+
+        result = engine.run_batch(items)
+        self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+        keys[:] = ["ctrl", "c"]
+
+        gate.resolve(result["result"]["request_id"], approve=True)
+
+        combos = [event for event in driver.log() if event["kind"] == "combo"]
+        self.assertEqual(combos, [{"kind": "combo", "keys": ["win", "r"]}])
+
     def test_batch_stops_on_error(self):
         engine, _, _, _, _ = make_engine()
         r = engine.run_tool("batch.execute", {
