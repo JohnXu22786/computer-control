@@ -165,21 +165,22 @@ class WindowsDriver(BaseDriver):
         """Best-effort per-monitor DPI awareness so all Win32 geometry is in
         physical pixels. Called once, before any other Win32 call."""
         try:
-            self._user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
-            return "per-monitor-v2"
+            if self._user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+                return "per-monitor-v2"
         except Exception:
             pass
         try:
             shcore = ctypes.WinDLL("shcore.dll")
-            shcore.SetProcessDpiAwareness(2)
-            return "per-monitor"
+            if shcore.SetProcessDpiAwareness(2) >= 0:
+                return "per-monitor"
         except Exception:
             pass
         try:
-            self._user32.SetProcessDPIAware()
-            return "system"
+            if self._user32.SetProcessDPIAware():
+                return "system"
         except Exception:
             return "unaware"
+        return "unaware"
 
     def _read_virtual_screen(self):
         gsm = self._user32.GetSystemMetrics

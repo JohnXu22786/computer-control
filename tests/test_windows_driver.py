@@ -2,7 +2,10 @@
 
 import unittest
 from PIL import Image
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
+import computer_control.drivers.windows as windows_module
 from computer_control.drivers.windows import (
     MOUSEEVENTF_ABSOLUTE,
     MOUSEEVENTF_MOVE,
@@ -35,6 +38,22 @@ class TestWindowsAbsoluteMouse(unittest.TestCase):
                                  "png", 85, False)
 
         self.assertEqual((payload.width, payload.height), (1, 1024))
+
+
+class TestWindowsDpiAwareness(unittest.TestCase):
+    def test_false_context_result_uses_per_monitor_fallback(self):
+        driver = WindowsDriver.__new__(WindowsDriver)
+        driver._user32 = SimpleNamespace(
+            SetProcessDpiAwarenessContext=Mock(return_value=False),
+            SetProcessDPIAware=Mock(return_value=False),
+        )
+        set_process_dpi_awareness = Mock(return_value=0)
+        shcore = SimpleNamespace(SetProcessDpiAwareness=set_process_dpi_awareness)
+
+        with patch.object(windows_module.ctypes, "WinDLL", return_value=shcore, create=True):
+            self.assertEqual(driver._set_dpi_awareness(), "per-monitor")
+
+        set_process_dpi_awareness.assert_called_once_with(2)
 
 
 if __name__ == "__main__":
