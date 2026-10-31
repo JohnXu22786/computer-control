@@ -74,6 +74,24 @@ class TestLifecycle(RouterFixture):
         response = self.call("no.such.method")
         self.assertEqual(response["error"]["code"], -32601)
 
+    def test_explicit_null_id_is_a_request(self):
+        calls = []
+        self.router._handlers["test.echo"] = lambda params: calls.append(params) or {"value": params["value"]}
+
+        response = self.router.handle({
+            "jsonrpc": "2.0",
+            "id": None,
+            "method": "test.echo",
+            "params": {"value": "handled"},
+        })
+
+        self.assertEqual(calls, [{"value": "handled"}])
+        self.assertEqual(response, {
+            "jsonrpc": "2.0",
+            "id": None,
+            "result": {"value": "handled"},
+        })
+
     def test_call_before_start(self):
         response = self.call("tools.call", {"tool": "screen.capture", "arguments": {}})
         self.assertFalse(response["result"]["ok"])
