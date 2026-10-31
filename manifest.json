@@ -30,7 +30,7 @@
   "tools": [
     {
       "name": "a11y.activate",
-      "summary": "Semantically activate an element from the latest snapshot (invoke/toggle/select pattern first; pixel click on its bounding box as fallback).",
+      "summary": "Semantically activate an element from the latest snapshot (auto tries invoke/toggle/select patterns before a pixel click; pattern uses UIA patterns only; pointer skips patterns).",
       "risk": "moderate",
       "availability": "platform dependent",
       "parameters": [
