@@ -158,6 +158,7 @@ class HttpClient(_BaseClient):
         super().__init__(timeout)
         self._base_url = base_url.rstrip("/")
         self._stop_event = threading.Event()
+        self._sse_lock = threading.Lock()
         self._sse_response = None
         self._sse_thread = threading.Thread(target=self._sse_loop, daemon=True)
         self._sse_thread.start()
@@ -185,9 +186,22 @@ class HttpClient(_BaseClient):
             raise ClientError("connection failed: %s" % exc)
 
     def _sse_loop(self) -> None:
-        try:
-            with urllib.request.urlopen(self._base_url + "/events", timeout=None) as resp:
-                self._sse_response = resp
+        while not self._stop_event.is_set():
+            resp = None
+            try:
+                # Bound connection establishment so close cannot leave this
+                # thread stuck inside urlopen without a response to close.
+                resp = urllib.request.urlopen(self._base_url + "/events", timeout=1.0)
+                # SSE streams are intentionally long-lived; keep reads blocking
+                # after the bounded connection attempt succeeds.
+                sock = getattr(getattr(getattr(resp, "fp", None), "raw", None), "_sock", None)
+                if sock is not None:
+                    sock.settimeout(None)
+                with self._sse_lock:
+                    if self._stop_event.is_set():
+                        resp.close()
+                        return
+                    self._sse_response = resp
                 buffer = b""
                 while not self._stop_event.is_set():
                     chunk = resp.read(1)
@@ -197,10 +211,21 @@ class HttpClient(_BaseClient):
                     if buffer.endswith(b"\n\n"):
                         self._dispatch_sse(buffer)
                         buffer = b""
-        except Exception:
-            pass
-        finally:
-            self._sse_response = None
+            except Exception:
+                # A failed connection or stream is temporary: keep trying while
+                # the client is open. The event wait makes close interrupt the
+                # delay instead of leaving the daemon thread sleeping.
+                pass
+            finally:
+                if resp is not None:
+                    try:
+                        resp.close()
+                    except Exception:
+                        pass
+                    with self._sse_lock:
+                        if self._sse_response is resp:
+                            self._sse_response = None
+            self._stop_event.wait(0.25)
 
     def _dispatch_sse(self, chunk: bytes) -> None:
         for block in chunk.decode("utf-8", errors="replace").split("\n\n"):
@@ -214,7 +239,8 @@ class HttpClient(_BaseClient):
 
     def close(self) -> None:
         self._stop_event.set()
-        resp = self._sse_response
+        with self._sse_lock:
+            resp = self._sse_response
         if resp is not None:
             try:
                 if hasattr(resp, "fp") and resp.fp:
