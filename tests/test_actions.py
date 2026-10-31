@@ -1,7 +1,9 @@
 """Unit tests for the action registry: validation, coercion, ranges and risk."""
 
 import unittest
+from unittest.mock import Mock
 
+from computer_control.engine import Engine
 from computer_control.actions import (
     ACTION_REGISTRY,
     ValidationError,
@@ -116,6 +118,21 @@ class TestValidation(unittest.TestCase):
         clean_arguments("keyboard.type", {"text": "x" * 10000})
         with self.assertRaises(ValidationError):
             clean_arguments("keyboard.type", {"text": "x" * 10001})
+
+    def test_batch_items_must_be_a_list(self):
+        with self.assertRaises(ValidationError) as ctx:
+            clean_arguments("batch.execute", {"items": 1})
+        self.assertTrue(any("items" in issue for issue in ctx.exception.issues))
+
+    def test_batch_tool_rejects_non_list_items_before_execution(self):
+        gate = Mock()
+        engine = Engine(Mock(), Mock(), gate, Mock(), lambda: None)
+
+        result = engine.run_tool("batch.execute", {"items": 1})
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "invalid_arguments")
+        gate.evaluate.assert_not_called()
 
     def test_batch_validation(self):
         items = [{"tool": "wait.pause", "arguments": {"ms": 1}}, {"tool": "screen.capture", "arguments": {}}]
