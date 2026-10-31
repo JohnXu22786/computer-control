@@ -11,7 +11,27 @@ from computer_control.drivers.base import DriverError
 
 
 class _ElementCollection:
-    Length = 0
+    def __init__(self, elements=()):
+        self._elements = elements
+        self.Length = len(elements)
+
+    def GetElement(self, index):
+        return self._elements[index]
+
+
+class _TreeElement:
+    def __init__(self, name, children=()):
+        self.name = name
+        self.children = children
+
+    def GetCurrentPropertyValue(self, property_id):
+        return {1: 50032, 2: self.name}.get(property_id)
+
+    def GetCurrentBoundingRectangle(self):
+        raise RuntimeError("no bounds")
+
+    def FindAll(self, scope, condition):
+        return _ElementCollection(self.children)
 
 
 class _RootElement:
@@ -162,6 +182,41 @@ class TestUiaActivationMethods(unittest.TestCase):
         automatic = bridge.activate(7, method="auto")
 
         self.assertEqual(automatic["method_used"], "pointer")
+
+
+class TestUiaSnapshotNodeVisibility(unittest.TestCase):
+    def test_depth_pruned_node_is_not_actionable_and_new_snapshot_replaces_index(self):
+        root = _TreeElement("Desktop", [
+            _TreeElement("Visible child", [_TreeElement("Pruned grandchild")]),
+        ])
+        auto = mock.Mock()
+        auto.GetRootElement.return_value = root
+        auto.CreateTrueCondition.return_value = object()
+        module = types.SimpleNamespace(
+            UIA_ControlTypePropertyId=1,
+            UIA_NamePropertyId=2,
+        )
+        bridge = UiaBridge()
+        bridge._require = mock.Mock(return_value=(auto, module))
+        bridge._center_of = mock.Mock(return_value={"x": 1.0, "y": 2.0})
+
+        snapshot = bridge.snapshot({"level": "full", "depth": 2})
+
+        self.assertEqual(snapshot["node_count"], 2)
+        self.assertEqual(bridge._element(2), root.children[0])
+        self.assertEqual(bridge.activate(2, method="pointer")["node_id"], 2)
+        for name, action in (("activate", lambda: bridge.activate(3)),
+                             ("input", lambda: bridge.set_text(3, "text"))):
+            with self.subTest(action=name):
+                with self.assertRaises(DriverError) as raised:
+                    action()
+                self.assertEqual(raised.exception.code, "unknown_node")
+
+        auto.GetRootElement.return_value = _TreeElement("New desktop")
+        bridge.snapshot({"level": "full"})
+        with self.assertRaises(DriverError) as raised:
+            bridge._element(2)
+        self.assertEqual(raised.exception.code, "unknown_node")
 
 
 if __name__ == "__main__":

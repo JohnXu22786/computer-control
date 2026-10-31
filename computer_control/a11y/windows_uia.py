@@ -16,7 +16,7 @@ import threading
 import time
 from typing import Optional
 
-from computer_control.a11y.tree import build_node, summarize
+from computer_control.a11y.tree import build_node, flatten_nodes, summarize
 from computer_control.drivers.base import DriverError
 
 # Property / pattern ids are read from the generated module, never hardcoded.
@@ -143,6 +143,7 @@ class UiaBridge:
             state = self._state()
             self._walk_cap = options.get("hard_walk_cap", 5000)
             state.nodes = {}
+            walked_nodes = {}
             next_id = {"value": 1}
 
             def walk(element, budget):
@@ -165,7 +166,7 @@ class UiaBridge:
                 node["id"] = next_id["value"]
                 next_id["value"] += 1
                 budget["remaining"] -= 1
-                state.nodes[node["id"]] = element
+                walked_nodes[node["id"]] = element
 
                 try:
                     condition = auto.CreateTrueCondition()
@@ -196,6 +197,11 @@ class UiaBridge:
                 include_rects=options.get("include_rects", True),
                 name_cap=options.get("max_name_len"),
             )
+            state.nodes = {
+                node["id"]: walked_nodes[node["id"]]
+                for node in flatten_nodes(summary)
+                if node.get("id") in walked_nodes
+            }
             return {"tree": summary, "node_count": count,
                     "truncated": truncated or budget["truncated"], "generated_at": time.time()}
 
