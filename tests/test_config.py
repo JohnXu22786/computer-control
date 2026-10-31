@@ -101,6 +101,17 @@ class TestFromDict(unittest.TestCase):
         with self.assertRaises(ConfigError):
             from_dict({"safety": {"rules": ["not-a-dict"]}})
 
+    def test_glob_rule_requires_string_value(self):
+        rules = [{
+            "match": {
+                "tool": "keyboard.type",
+                "argument": {"name": "text", "matcher": "glob", "value": ["secret*"]},
+            },
+            "effect": "deny",
+        }]
+        with self.assertRaises(ConfigError):
+            from_dict({"safety": {"rules": rules}})
+
     def test_idle_action_enum(self):
         with self.assertRaises(ConfigError):
             from_dict({"safety": {"idle_action": "explode"}})

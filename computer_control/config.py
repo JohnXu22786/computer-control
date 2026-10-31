@@ -221,6 +221,8 @@ def _parse_rule(raw, index) -> RuleConfig:
         if matcher not in RULE_MATCHERS:
             raise ConfigError("safety.rules[%d].match.argument.matcher must be one of %s"
                               % (index, "/".join(RULE_MATCHERS)))
+        if matcher == "glob" and not isinstance(value, str):
+            raise ConfigError("safety.rules[%d].match.argument.value must be a string for glob matcher" % index)
     return RuleConfig(tool, argument_name, matcher, value, effect)
 
 
