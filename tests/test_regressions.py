@@ -531,6 +531,81 @@ class TestStopSemantics(unittest.TestCase):
                 if thread.ident is not None:
                     thread.join(timeout=2)
 
+    def test_restart_does_not_reanimate_timed_out_worker(self):
+        session = self.session
+        old_worker = session._worker
+        old_queue = session._worker_queue
+        old_stop_requested = session._stop_requested
+        action_started = threading.Event()
+        release_action = threading.Event()
+        action_thread_id = {}
+        original_run_tool = session._engine.run_tool
+
+        def blocked_run_tool(tool, arguments):
+            action_started.set()
+            release_action.wait(3)
+            return original_run_tool(tool, arguments)
+
+        session._engine.run_tool = blocked_run_tool
+        first_result = {}
+        first_caller = threading.Thread(
+            target=lambda: first_result.update(result=session.call("wait.pause", {"ms": 1}))
+        )
+        first_caller.start()
+        self.assertTrue(action_started.wait(2))
+
+        # Model the bounded join expiring without spending 30 seconds in the
+        # regression test. The worker remains blocked in its current action.
+        with mock.patch.object(old_worker, "join", return_value=None):
+            stopped = session.stop()
+        self.assertTrue(stopped["ok"])
+        self.assertTrue(old_worker.is_alive())
+
+        session.start({})
+        new_worker = session._worker
+        new_queue = session._worker_queue
+        new_stop_requested = session._stop_requested
+        allow_new_worker = threading.Event()
+        original_get = new_queue.get
+
+        def wait_for_new_worker(timeout=None):
+            # Keep the restarted worker from racing the stale worker for the
+            # queued action. A stale worker using the session's new queue will
+            # still take it, making the failing interleaving deterministic.
+            if threading.current_thread() is new_worker:
+                allow_new_worker.wait(2)
+            return original_get(timeout=timeout)
+
+        new_queue.get = wait_for_new_worker
+        restarted_engine = session._engine
+        restarted_run_tool = restarted_engine.run_tool
+
+        def record_action_thread(tool, arguments):
+            action_thread_id["id"] = threading.get_ident()
+            return restarted_run_tool(tool, arguments)
+
+        restarted_engine.run_tool = record_action_thread
+        new_result = {}
+        new_caller = threading.Thread(
+            target=lambda: new_result.update(result=session.call("wait.pause", {"ms": 1}))
+        )
+        new_caller.start()
+        self.assertTrue(wait_for(lambda: new_queue.qsize() == 1))
+
+        release_action.set()
+        old_worker.join(timeout=2)
+        self.assertFalse(old_worker.is_alive())
+        allow_new_worker.set()
+        new_caller.join(timeout=2)
+        first_caller.join(timeout=2)
+        self.assertFalse(first_caller.is_alive())
+        self.assertFalse(new_caller.is_alive())
+        self.assertIn("result", first_result)
+        self.assertTrue(new_result["result"]["ok"])
+        self.assertEqual(action_thread_id["id"], new_worker.ident)
+        self.assertIsNot(old_queue, new_queue)
+        self.assertIsNot(old_stop_requested, new_stop_requested)
+
 
 class TestConfirmEventOrder(unittest.TestCase):
     def test_event_order_after_approval(self):
