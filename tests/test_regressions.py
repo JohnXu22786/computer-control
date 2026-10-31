@@ -531,6 +531,107 @@ class TestStopSemantics(unittest.TestCase):
                 if thread.ident is not None:
                     thread.join(timeout=2)
 
+    def test_restart_does_not_reanimate_timed_out_worker(self):
+        session = self.session
+        old_worker = session._worker
+        old_queue = session._worker_queue
+        old_stop_requested = session._stop_requested
+        action_started = threading.Event()
+        release_action = threading.Event()
+        action_thread_id = {}
+        original_run_tool = session._engine.run_tool
+
+        def blocked_run_tool(tool, arguments):
+            action_started.set()
+            release_action.wait(30)
+            return original_run_tool(tool, arguments)
+
+        session._engine.run_tool = blocked_run_tool
+        first_result = {}
+        first_caller = threading.Thread(
+            target=lambda: first_result.update(result=session.call("wait.pause", {"ms": 1}))
+        )
+        first_caller.start()
+        self.assertTrue(action_started.wait(2))
+
+        # Model the bounded join expiring without spending 30 seconds in the
+        # regression test. The worker remains blocked in its current action.
+        with mock.patch.object(old_worker, "join", return_value=None):
+            stopped = session.stop()
+        self.assertTrue(stopped["ok"])
+        self.assertTrue(old_worker.is_alive())
+
+        allow_new_worker = threading.Event()
+        task_queued = threading.Event()
+        original_thread_start = threading.Thread.start
+
+        def start_gated_worker(worker):
+            # Install the queue gate before the restarted worker can call
+            # get(); patching after start would leave a race with its first
+            # queue read.
+            if worker.name == "session-worker":
+                worker_queue = worker._args[0]
+                original_get = worker_queue.get
+
+                def wait_for_new_worker(timeout=None):
+                    # A stale worker using the new queue will not be gated and
+                    # will deterministically take any action already queued.
+                    if threading.current_thread() is worker:
+                        allow_new_worker.wait()
+                    return original_get(timeout=timeout)
+
+                worker_queue.get = wait_for_new_worker
+            return original_thread_start(worker)
+
+        with mock.patch.object(threading.Thread, "start", start_gated_worker):
+            session.start({})
+        new_worker = session._worker
+        new_queue = session._worker_queue
+        new_stop_requested = session._stop_requested
+        original_put = new_queue.put
+
+        def record_put(task, *args, **kwargs):
+            result = original_put(task, *args, **kwargs)
+            task_queued.set()
+            return result
+
+        new_queue.put = record_put
+        restarted_engine = session._engine
+        restarted_run_tool = restarted_engine.run_tool
+
+        def record_action_thread(tool, arguments):
+            action_thread_id["id"] = threading.get_ident()
+            return restarted_run_tool(tool, arguments)
+
+        restarted_engine.run_tool = record_action_thread
+        new_result = {}
+        new_caller = threading.Thread(
+            target=lambda: new_result.update(result=session.call("wait.pause", {"ms": 1}))
+        )
+        new_caller.start()
+        try:
+            self.assertTrue(task_queued.wait(5))
+
+            release_action.set()
+            old_worker.join(timeout=2)
+            self.assertFalse(old_worker.is_alive())
+            allow_new_worker.set()
+            new_caller.join(timeout=2)
+            first_caller.join(timeout=2)
+            self.assertFalse(first_caller.is_alive())
+            self.assertFalse(new_caller.is_alive())
+            self.assertIn("result", first_result)
+            self.assertTrue(new_result["result"]["ok"])
+            self.assertEqual(action_thread_id["id"], new_worker.ident)
+            self.assertIsNot(old_queue, new_queue)
+            self.assertIsNot(old_stop_requested, new_stop_requested)
+        finally:
+            release_action.set()
+            allow_new_worker.set()
+            for thread in (old_worker, first_caller, new_caller, new_worker):
+                if thread.ident is not None:
+                    thread.join(timeout=2)
+
 
 class TestConfirmEventOrder(unittest.TestCase):
     def test_event_order_after_approval(self):
