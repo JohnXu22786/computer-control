@@ -322,6 +322,19 @@ class TestWait(unittest.TestCase):
 
 
 class TestBatch(unittest.TestCase):
+    def test_deeply_nested_batch_returns_validation_error_before_execution(self):
+        engine, driver, _, _, _ = make_engine()
+        nested = {"tool": "wait.pause", "arguments": {"ms": 1}}
+        for _ in range(1200):
+            nested = {"tool": "batch.execute", "arguments": {"items": [nested]}}
+
+        result = engine.run_tool("batch.execute", {"items": [nested]})
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "invalid_arguments")
+        self.assertTrue(result["error"]["data"]["issues"])
+        self.assertEqual(driver.log(), [])
+
     def test_batch_confirmation_uses_snapshot_of_nested_caller_arguments(self):
         engine, driver, gate, _, _ = make_engine({"safety": {"confirm_threshold": "moderate"}})
         keys = ["win", "r"]

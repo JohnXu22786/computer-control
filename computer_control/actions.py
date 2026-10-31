@@ -37,6 +37,9 @@ class ValidationError(ValueError):
         super().__init__("; ".join(issues))
 
 
+MAX_BATCH_NESTING = 32
+
+
 @dataclass
 class ParamSpec:
     name: str
@@ -372,7 +375,7 @@ def _validate_key_param(keys, issues, tool) -> None:
         seen.add(name.lower())
 
 
-def clean_arguments(tool: str, raw_args) -> dict:
+def clean_arguments(tool: str, raw_args, _batch_depth: int = 0) -> dict:
     """Validate and normalize arguments for a tool.
 
     Returns the cleaned arguments (defaults filled, types coerced, key names
@@ -426,7 +429,9 @@ def clean_arguments(tool: str, raw_args) -> dict:
             issues.append("text: too long (%d characters, max 10000)" % len(text))
     elif tool == "batch.execute":
         items = cleaned.get("items") or []
-        if not items:
+        if _batch_depth >= MAX_BATCH_NESTING:
+            issues.append("batch nesting exceeds maximum depth (%d)" % MAX_BATCH_NESTING)
+        elif not items:
             issues.append("items: must contain at least one action")
         else:
             sub_issues = []
@@ -442,7 +447,11 @@ def clean_arguments(tool: str, raw_args) -> dict:
                 # per-item failures so a batch can continue past them
                 if get_spec(item_tool) is not None:
                     try:
-                        clean_arguments(item_tool, item.get("arguments"))
+                        clean_arguments(
+                            item_tool,
+                            item.get("arguments"),
+                            _batch_depth + (item_tool == "batch.execute"),
+                        )
                     except ValidationError as exc:
                         for issue in exc.issues:
                             sub_issues.append("items[%d]: %s" % (i, issue))

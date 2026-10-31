@@ -130,6 +130,24 @@ class TestValidation(unittest.TestCase):
         with self.assertRaises(ValidationError):
             clean_arguments("batch.execute", {"items": [{"tool": 42, "arguments": {}}]})
 
+    def test_nested_batch_validation_is_bounded(self):
+        nested = {"tool": "wait.pause", "arguments": {"ms": 1}}
+        for _ in range(1200):
+            nested = {"tool": "batch.execute", "arguments": {"items": [nested]}}
+
+        with self.assertRaises(ValidationError):
+            clean_arguments("batch.execute", {"items": [nested]})
+
+    def test_shallow_nested_batch_validation(self):
+        nested = {
+            "tool": "batch.execute",
+            "arguments": {
+                "items": [{"tool": "wait.pause", "arguments": {"ms": 1}}],
+            },
+        }
+        args = clean_arguments("batch.execute", {"items": [nested]})
+        self.assertEqual(args["items"][0]["tool"], "batch.execute")
+
     def test_defaults_filled(self):
         args = clean_arguments("pointer.click", {})
         self.assertEqual(args["button"], "left")
