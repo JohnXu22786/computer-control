@@ -142,6 +142,41 @@ class TestRequestIds(unittest.TestCase):
         ids = {client._next_id() for _ in range(50)}
         self.assertEqual(len(ids), 50)
 
+    def test_stdio_call_honors_explicit_zero_and_default_timeout(self):
+        from computer_control.client import _BaseClient
+
+        class FakeEvent:
+            def __init__(self):
+                self.wait_timeout = None
+
+            def wait(self, timeout):
+                self.wait_timeout = timeout
+                return False
+
+        class FakeStdin:
+            def write(self, _payload):
+                pass
+
+            def flush(self):
+                pass
+
+        class FakeProcess:
+            stdin = FakeStdin()
+
+        for requested_timeout, expected_timeout in ((0, 0), (None, 0.02)):
+            with self.subTest(requested_timeout=requested_timeout):
+                client = StdioClient.__new__(StdioClient)
+                _BaseClient.__init__(client, timeout=0.02)
+                client._process = FakeProcess()
+                client._responses = {}
+                client._pending = {}
+                client._lock = threading.Lock()
+                event = FakeEvent()
+                with patch("computer_control.client.threading.Event", return_value=event):
+                    with self.assertRaisesRegex(ClientError, "no response within"):
+                        client.call("test", timeout=requested_timeout)
+                self.assertEqual(event.wait_timeout, expected_timeout)
+
     def test_stdio_discards_response_after_request_times_out(self):
         class FakeStdout:
             def __init__(self):
@@ -248,6 +283,29 @@ class TestHttpClient(unittest.TestCase):
         finally:
             collector.stop()
             client.close()
+
+    def test_http_call_honors_explicit_zero_and_default_timeout(self):
+        from computer_control.client import _BaseClient
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            def read(self):
+                return b'{"jsonrpc":"2.0","result":{"ok":true}}'
+
+        client = HttpClient.__new__(HttpClient)
+        _BaseClient.__init__(client, timeout=0.02)
+        client._base_url = "http://example.test"
+        with patch("computer_control.client.urllib.request.urlopen", return_value=FakeResponse()) as urlopen:
+            for requested_timeout, expected_timeout in ((0, 0), (None, 0.02)):
+                with self.subTest(requested_timeout=requested_timeout):
+                    self.assertEqual(client.call("test", timeout=requested_timeout), {"ok": True})
+                    self.assertEqual(urlopen.call_args.kwargs["timeout"], expected_timeout)
+                    urlopen.reset_mock()
 
     def test_http_client_close_terminates_sse_thread(self):
         client = HttpClient("http://127.0.0.1:%d" % self.port, timeout=5)
