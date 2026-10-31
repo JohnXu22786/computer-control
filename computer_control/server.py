@@ -20,6 +20,7 @@ reaches the wire (stdio notification) and the event ring (HTTP replay).
 from __future__ import annotations
 
 import json
+import math
 import sys
 import threading
 import time
@@ -162,6 +163,16 @@ def _extract_id(line: bytes):
     return None
 
 
+def _extract_valid_request_id(body: bytes):
+    """Return a usable JSON-RPC ID from a body, or null when it is invalid."""
+    request_id = _extract_id(body)
+    if isinstance(request_id, bool) or not isinstance(request_id, (str, int, float, type(None))):
+        return None
+    if isinstance(request_id, float) and not math.isfinite(request_id):
+        return None
+    return request_id
+
+
 def _stack() -> str:
     import traceback
 
@@ -206,7 +217,8 @@ def make_http_server(router: Router, host: str, port: int):
             try:
                 request = load_request(body)
             except ProtocolError as exc:
-                self._json_response(400, {"jsonrpc": "2.0", "id": None, "error": exc.as_jsonrpc()})
+                request_id = _extract_valid_request_id(body)
+                self._json_response(400, {"jsonrpc": "2.0", "id": request_id, "error": exc.as_jsonrpc()})
                 return
             try:
                 response = router.handle(request)

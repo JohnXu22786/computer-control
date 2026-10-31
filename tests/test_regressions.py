@@ -887,6 +887,27 @@ class TestHttpTransport(unittest.TestCase):
         response = json.loads(body)
         self.assertEqual(response["result"]["result"]["state"], "idle")
 
+    def test_request_error_preserves_valid_id(self):
+        status, body = self._post(
+            b'{"jsonrpc":"2.0","id":5,"method":"system.status","params":[]}'
+        )
+        self.assertEqual(status, 400)
+        response = json.loads(body)
+        self.assertEqual(response["id"], 5)
+        self.assertEqual(response["error"]["code"], -32602)
+
+    def test_request_error_uses_null_for_invalid_id(self):
+        requests = (
+            b'{"jsonrpc":"2.0","id":true,"method":"system.status","params":{}}',
+            b'{"jsonrpc":"2.0","method":"system.status","params":[]}',
+        )
+        for request in requests:
+            with self.subTest(request=request):
+                status, body = self._post(request)
+                self.assertEqual(status, 400)
+                response = json.loads(body)
+                self.assertIsNone(response["id"])
+
     def test_health(self):
         import urllib.request
 
