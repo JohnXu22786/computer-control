@@ -215,7 +215,7 @@ def _build_registry() -> dict:
 
     tools["a11y.activate"] = ActionSpec(
         name="a11y.activate",
-        summary="Semantically activate an element from the latest snapshot (invoke/toggle/select pattern first; pixel click on its bounding box as fallback).",
+        summary="Semantically activate an element from the latest snapshot (auto tries invoke/toggle/select patterns before a pixel click; pattern uses UIA patterns only; pointer skips patterns).",
         risk=RISK_MODERATE,
         params=[
             _p("snapshot_id", "str", "The snapshot_id of the most recent a11y.snapshot. Stale ids are rejected.", required=True),

@@ -223,6 +223,11 @@ class UiaBridge:
                 result = self._invoke_patterns(element, mod)
                 if result is not None:
                     return {"node_id": node_id, "method_used": result, "position": position}
+                if method == "pattern":
+                    raise DriverError(
+                        "element %s has no supported activation pattern" % node_id,
+                        code="pattern_unavailable",
+                    )
 
             if position is None:
                 raise DriverError(

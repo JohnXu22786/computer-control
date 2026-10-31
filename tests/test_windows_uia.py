@@ -7,6 +7,7 @@ import unittest
 from unittest import mock
 
 from computer_control.a11y.windows_uia import UiaBridge
+from computer_control.drivers.base import DriverError
 
 
 class _ElementCollection:
@@ -97,6 +98,39 @@ class TestUiaThreadOwnership(unittest.TestCase):
         self.assertEqual(created_on, [threading.get_ident(), worker_thread_id[0]])
         self.assertEqual(initialized_on, [threading.get_ident(), worker_thread_id[0]])
         self.assertEqual(sorted(uninitialized_on), sorted([threading.get_ident(), worker_thread_id[0]]))
+
+
+class TestUiaActivationMethods(unittest.TestCase):
+    def _bridge_with_bounded_element(self):
+        bridge = UiaBridge()
+        bridge._require = mock.Mock(return_value=(object(), object()))
+        bridge._element = mock.Mock(return_value=object())
+        bridge._center_of = mock.Mock(return_value={"x": 12.0, "y": 34.0})
+        return bridge
+
+    def test_pattern_mode_does_not_fall_back_to_pointer(self):
+        bridge = self._bridge_with_bounded_element()
+        bridge._invoke_patterns = mock.Mock(return_value=None)
+
+        with self.assertRaises(DriverError) as raised:
+            bridge.activate(7, method="pattern")
+
+        self.assertEqual(raised.exception.code, "pattern_unavailable")
+        bridge._invoke_patterns.assert_called_once()
+
+    def test_pointer_skips_patterns_and_auto_keeps_pointer_fallback(self):
+        bridge = self._bridge_with_bounded_element()
+        bridge._invoke_patterns = mock.Mock(return_value=None)
+
+        pointer = bridge.activate(7, method="pointer")
+
+        self.assertEqual(pointer["method_used"], "pointer")
+        bridge._invoke_patterns.assert_not_called()
+
+        automatic = bridge.activate(7, method="auto")
+
+        self.assertEqual(automatic["method_used"], "pointer")
+        bridge._invoke_patterns.assert_called_once()
 
 
 if __name__ == "__main__":
