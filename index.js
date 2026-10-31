@@ -85,10 +85,20 @@ function createClient(config, log) {
       const child = spawn(PYTHON, ['-m', 'computer_control', 'serve'], {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
+      let didSpawn = false;
       proc = child;
-      child.once('spawn', resolve);
-      child.once('error', reject);
+      child.once('spawn', () => {
+        didSpawn = true;
+        resolve();
+      });
       child.on('error', (err) => {
+        if (!didSpawn && proc === child) {
+          proc = null;
+          spawned = null;
+          sessionToken = null;
+          buffer = '';
+          reject(err);
+        }
         for (const waiter of pending.values()) waiter.reject(err);
         pending.clear();
       });

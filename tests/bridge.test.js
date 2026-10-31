@@ -115,3 +115,68 @@ process.stdin.on('data', (chunk) => {
     ],
   );
 });
+
+test('a request retries after the initial child process fails to spawn', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'computer-control-bridge-'));
+  const executable = join(directory, 'python-that-will-appear');
+  const eventsPath = join(directory, 'events.jsonl');
+  const previousPython = process.env.COMPUTER_CONTROL_PYTHON;
+  process.env.COMPUTER_CONTROL_PYTHON = executable;
+  let dispose;
+  t.after(async () => {
+    dispose?.();
+    await delay(50);
+    if (previousPython === undefined) delete process.env.COMPUTER_CONTROL_PYTHON;
+    else process.env.COMPUTER_CONTROL_PYTHON = previousPython;
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  const { apply } = await import('../index.js?spawn-retry');
+  const definitions = new Map();
+  apply({
+    tools: { register(definition) { definitions.set(definition.name, definition); return () => {}; } },
+    effect(callback) { dispose = callback; },
+  });
+  const tool = definitions.values().next().value;
+  assert.ok(tool, 'manifest tools are registered');
+
+  const firstResults = await Promise.all([
+    callWithTimeout(tool, 1000),
+    callWithTimeout(tool, 1000),
+  ]);
+  for (const first of firstResults) {
+    assert.equal(first.ok, false);
+    assert.equal(first.error.code, 'bridge_error');
+    assert.match(first.error.message, /ENOENT/);
+  }
+
+  writeFileSync(executable, `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+const eventsPath = ${JSON.stringify(eventsPath)};
+let buffer = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  let newline;
+  while ((newline = buffer.indexOf('\\n')) !== -1) {
+    const line = buffer.slice(0, newline);
+    buffer = buffer.slice(newline + 1);
+    const message = JSON.parse(line);
+    appendFileSync(eventsPath, JSON.stringify({ method: message.method }) + '\\n');
+    const result = message.method === 'session.start'
+      ? { ok: true, session_id: 'fake-session' }
+      : { ok: true, result: { generation: 1 }, meta: {} };
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }) + '\\n');
+  }
+});
+`);
+  chmodSync(executable, 0o700);
+
+  const retry = await callWithTimeout(tool, 1000);
+  assert.equal(retry.ok, true, JSON.stringify(retry));
+  assert.deepEqual(retry.result, { generation: 1 });
+  assert.deepEqual(
+    readFileSync(eventsPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line)),
+    [{ method: 'session.start' }, { method: 'tools.call' }],
+  );
+});
