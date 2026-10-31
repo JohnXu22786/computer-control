@@ -220,7 +220,12 @@ class UiaBridge:
             position = self._center_of(element)
 
             if method != "pointer":
-                result = self._invoke_patterns(element, mod)
+                try:
+                    result = self._invoke_patterns(element, mod)
+                except DriverError as exc:
+                    if method == "pattern" or exc.code != "pattern_activation_failed":
+                        raise
+                    result = None
                 if result is not None:
                     return {"node_id": node_id, "method_used": result, "position": position}
                 if method == "pattern":
@@ -237,6 +242,7 @@ class UiaBridge:
             return {"node_id": node_id, "method_used": "pointer", "position": position}
 
     def _invoke_patterns(self, element, mod) -> Optional[str]:
+        activation_error = None
         for pattern_id, iface_name, call in (
             (10000, "IUIAutomationInvokePattern", "Invoke"),
             (10001, "IUIAutomationTogglePattern", "Toggle"),
@@ -249,10 +255,18 @@ class UiaBridge:
                 if iface is None:
                     continue
                 pattern = obj.QueryInterface(iface)
-                getattr(pattern, call)()
-                return {10000: "invoke", 10001: "toggle", 10010: "select"}[pattern_id]
             except Exception:
                 continue
+            try:
+                getattr(pattern, call)()
+                return {10000: "invoke", 10001: "toggle", 10010: "select"}[pattern_id]
+            except Exception as exc:
+                activation_error = exc
+        if activation_error is not None:
+            raise DriverError(
+                "a supported UIA activation pattern failed",
+                code="pattern_activation_failed",
+            ) from activation_error
         return None
 
     # ----------------------------------------------------------- set text
