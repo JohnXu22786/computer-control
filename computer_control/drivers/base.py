@@ -128,3 +128,7 @@ class BaseDriver(ABC):
 
     def close(self) -> None:
         pass
+
+    def close_worker(self) -> None:
+        """Release resources owned by the session worker thread, if any."""
+        pass

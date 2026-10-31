@@ -742,6 +742,21 @@ class TestStopSemantics(unittest.TestCase):
                     thread.join(timeout=2)
 
 
+class TestSessionWorkerCleanup(unittest.TestCase):
+    def test_driver_worker_cleanup_runs_on_worker_thread(self):
+        driver = NullDriver(enable_a11y=True)
+        closed = threading.Event()
+        closed_on = []
+        driver.close_worker = lambda: (closed_on.append(threading.get_ident()), closed.set())
+        session = Session(emit=lambda t, p=None: None, driver_factory=lambda cfg: driver)
+        session.start({})
+        worker_ident = session._worker.ident
+        session.stop()
+
+        self.assertTrue(closed.is_set())
+        self.assertEqual(closed_on, [worker_ident])
+
+
 class TestConfirmEventOrder(unittest.TestCase):
     def test_event_order_after_approval(self):
         events = []

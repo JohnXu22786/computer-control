@@ -122,7 +122,7 @@ class Session:
             self._stop_requested = stop_requested
             self._worker_queue = worker_queue
             self._worker = threading.Thread(
-                target=self._worker_loop, args=(worker_queue, stop_requested),
+                target=self._worker_loop, args=(worker_queue, stop_requested, driver),
                 name="session-worker", daemon=True,
             )
             self._worker.start()
@@ -375,19 +375,23 @@ class Session:
 
     # ------------------------------------------------------- worker thread
 
-    def _worker_loop(self, worker_queue: queue.Queue, stop_requested: threading.Event) -> None:
-        while not stop_requested.is_set():
-            try:
-                task = worker_queue.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            run, outcome, holder = task
-            try:
-                run()
-            except Exception as exc:  # pragma: no cover - defensive
-                holder["result"] = _error("driver_failed", "the action raised an internal error: %s" % exc)
-            finally:
-                outcome.set()
+    def _worker_loop(self, worker_queue: queue.Queue, stop_requested: threading.Event,
+                     driver: BaseDriver) -> None:
+        try:
+            while not stop_requested.is_set():
+                try:
+                    task = worker_queue.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                run, outcome, holder = task
+                try:
+                    run()
+                except Exception as exc:  # pragma: no cover - defensive
+                    holder["result"] = _error("driver_failed", "the action raised an internal error: %s" % exc)
+                finally:
+                    outcome.set()
+        finally:
+            driver.close_worker()
 
     # ------------------------------------------------------- stop indicator
 

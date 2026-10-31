@@ -40,6 +40,17 @@ class TestWindowsAbsoluteMouse(unittest.TestCase):
         self.assertEqual((payload.width, payload.height), (1, 1024))
 
 
+class TestWindowsUiaProbe(unittest.TestCase):
+    def test_probe_closes_thread_local_uia_state(self):
+        driver = WindowsDriver.__new__(WindowsDriver)
+        bridge = SimpleNamespace(available=True, close=Mock())
+        driver._uia_bridge = lambda: bridge
+
+        self.assertTrue(driver._probe_uia())
+
+        bridge.close.assert_called_once_with()
+
+
 class TestWindowsDpiAwareness(unittest.TestCase):
     def test_false_context_result_uses_per_monitor_fallback(self):
         driver = WindowsDriver.__new__(WindowsDriver)
