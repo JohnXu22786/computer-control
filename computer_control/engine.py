@@ -30,6 +30,7 @@ class Engine:
         call, so runtime reconfiguration reaches the engine immediately."""
         self._driver = driver
         self._surface = surface
+        self._action_surface = surface
         self._gate = gate
         self._emit = emit
         self._get_cfg = config_provider
@@ -167,6 +168,11 @@ class Engine:
                 grayscale=bool(args.get("grayscale")))
         except DriverError as exc:
             return self._fail(exc.code, exc.message, tool="screen.capture", data=exc.data)
+        capture_surface = Surface(
+            payload.width, payload.height,
+            bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1],
+        )
+        self._action_surface = capture_surface
         self._frame += 1
         mime = "image/png" if payload.format == "png" else "image/jpeg"
         data_url = "data:%s;base64,%s" % (mime, base64.b64encode(payload.bytes).decode("ascii"))
@@ -177,7 +183,7 @@ class Engine:
             "height": payload.height,
             "bytes": len(payload.bytes),
             "data_url": data_url,
-            "canvas": self._surface.as_dict(),
+            "canvas": capture_surface.as_dict(),
         }, tool="screen.capture")
 
     def _fit_max_area(self, canvas_width: int, bbox: tuple) -> tuple:
@@ -198,7 +204,7 @@ class Engine:
     # pointer ---------------------------------------------------------------
 
     def _do_pointer_move(self, args: dict) -> ResultDict:
-        x, y = self._surface.to_physical(args["x"], args["y"])
+        x, y = self._action_surface.to_physical(args["x"], args["y"])
         steps = max(1, int(args.get("steps") or 1))
         self._driver.pointer_move(x, y, steps=steps)
         return self._ok({"position": {"x": args["x"], "y": args["y"]}}, tool="pointer.move")
@@ -206,7 +212,7 @@ class Engine:
     def _do_pointer_click(self, args: dict) -> ResultDict:
         position = None
         if args.get("x") is not None and args.get("y") is not None:
-            x, y = self._surface.to_physical(args["x"], args["y"])
+            x, y = self._action_surface.to_physical(args["x"], args["y"])
             self._driver.pointer_move(x, y, steps=1)
             position = {"x": args["x"], "y": args["y"]}
         times = max(1, int(args.get("times") or 1))
@@ -216,8 +222,8 @@ class Engine:
                         tool="pointer.click")
 
     def _do_pointer_drag(self, args: dict) -> ResultDict:
-        fx, fy = self._surface.to_physical(args["from"]["x"], args["from"]["y"])
-        tx, ty = self._surface.to_physical(args["to"]["x"], args["to"]["y"])
+        fx, fy = self._action_surface.to_physical(args["from"]["x"], args["from"]["y"])
+        tx, ty = self._action_surface.to_physical(args["to"]["x"], args["to"]["y"])
         steps = max(1, int(args.get("steps") or 24))
         hold_ms = max(0, int(args.get("hold_ms") or 0))
         self._driver.pointer_drag(fx, fy, tx, ty, args["button"],
@@ -228,7 +234,7 @@ class Engine:
 
     def _do_pointer_scroll(self, args: dict) -> ResultDict:
         if args.get("x") is not None and args.get("y") is not None:
-            x, y = self._surface.to_physical(args["x"], args["y"])
+            x, y = self._action_surface.to_physical(args["x"], args["y"])
             self._driver.pointer_move(x, y, steps=1)
         self._driver.pointer_scroll(args["axis"], float(args["amount"]))
         return self._ok({"axis": args["axis"], "amount": args["amount"]}, tool="pointer.scroll")

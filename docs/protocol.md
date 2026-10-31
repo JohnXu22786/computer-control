@@ -80,6 +80,8 @@ JSON-RPC 2.0，行分隔（每行一个 JSON 对象），UTF-8。HTTP 传输见�
 }}
 ```
 
+`canvas` dimensions match the returned image. Pointer coordinates after capture use this canvas and map to the captured physical rectangle, including when `scale` or `region` is set.
+
 ### 确认待批
 
 ```json

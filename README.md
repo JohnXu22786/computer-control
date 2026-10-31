@@ -153,7 +153,7 @@ All actions, parameters and examples: [`docs/actions.md`](docs/actions.md).
 
 ### Coordinate Contract
 
-The model sees a **canvas**, not the raw screen: screenshots are scaled to an aspect-preserving canvas whose width is `display_width_px` (default 1920), and coordinates returned by the model live on that canvas; the plugin maps them back to physical pixels uniformly via `scale = physical width / canvas width`. The `screen.capture` result carries a `canvas` field along with `display_width_px/display_height_px` as the source of truth. Multi-monitor setups (including negative-coordinate regions left/above the primary display) and per-monitor DPI are handled in the execution layer.
+The model sees a **canvas**, not the raw screen: each `screen.capture` result reports the captured image's actual dimensions in `canvas.display_width_px` and `canvas.display_height_px`, and subsequent pointer coordinates use that canvas. This includes the optional `scale` setting and captured regions; the plugin maps image coordinates back to the corresponding physical rectangle. Multi-monitor setups (including negative-coordinate regions left/above the primary display) and per-monitor DPI are handled in the execution layer.
 
 ## Safety
 
