@@ -70,6 +70,19 @@ class RouterFixture(unittest.TestCase):
 
 
 class TestLifecycle(RouterFixture):
+    def test_start_accepts_empty_config_wrapper(self):
+        response = self.start_session({"config": {}})
+
+        self.assertTrue(response["result"]["ok"], response)
+        self.assertEqual(response["result"]["result"]["state"], "ready")
+
+    def test_configure_accepts_empty_patch_wrapper(self):
+        self.start_session()
+
+        response = self.call("session.configure", {"patch": {}})
+
+        self.assertTrue(response["result"]["ok"], response)
+
     def test_start_unrepresentable_timeout_returns_invalid_config(self):
         large_integer = json.loads("1" + "0" * 400)
         response = self.start_session({"safety": {"confirm_timeout_s": large_integer}})
