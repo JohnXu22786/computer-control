@@ -99,7 +99,9 @@ class Engine:
         provide them, so the configured defaults actually take effect."""
         if tool != "screen.capture":
             return arguments
-        args = dict(arguments or {})
+        if not isinstance(arguments, dict):
+            return arguments
+        args = dict(arguments)
         cfg = self._get_cfg()
         args.setdefault("format", cfg.capture.default_format)
         args.setdefault("quality", cfg.capture.default_quality)
