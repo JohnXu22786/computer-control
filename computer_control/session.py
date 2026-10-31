@@ -94,7 +94,7 @@ class Session:
                 raise SessionError("already_started", "session is already running; call session.stop first")
             try:
                 base = from_dict(self._base_config) if self._base_config else default_config()
-                cfg = apply_overrides(base, raw_config or {})
+                cfg = apply_overrides(base, raw_config if raw_config is not None else {})
             except ValueError as exc:
                 raise SessionError("invalid_config", "configuration rejected: %s" % exc)
             self._cfg = cfg
@@ -199,13 +199,15 @@ class Session:
         with self._lock:
             if self._gate is None:
                 raise SessionError("not_started", "no session is running")
-            denied_sections = set((patch or {})) - set(_CONFIGURABLE_KEYS)
+            if not isinstance(patch, dict):
+                raise SessionError("invalid_config", "configuration patch must be an object")
+            denied_sections = set(patch) - set(_CONFIGURABLE_KEYS)
             if denied_sections:
                 raise SessionError("invalid_config",
                                    "not configurable at runtime: %s" % ", ".join(sorted(denied_sections)))
             immutable = []
             for section, fields in _IMMUTABLE_FIELDS.items():
-                section_patch = (patch or {}).get(section)
+                section_patch = patch.get(section)
                 if isinstance(section_patch, dict):
                     for field in fields:
                         if field in section_patch:
@@ -214,13 +216,13 @@ class Session:
                 raise SessionError("invalid_config",
                                    "immutable after session.start: %s" % ", ".join(sorted(immutable)))
             try:
-                new_cfg = apply_overrides(self._cfg, patch or {})
+                new_cfg = apply_overrides(self._cfg, patch)
             except ValueError as exc:
                 raise SessionError("invalid_config", "configuration rejected: %s" % exc)
             self._cfg = new_cfg
             self._gate.reconfigure(new_cfg.safety)
-            self._emit("session.configured", {"patch": patch or {}})
-            return {"ok": True, "result": {"state": self.state, "applied": patch or {}},
+            self._emit("session.configured", {"patch": patch})
+            return {"ok": True, "result": {"state": self.state, "applied": patch},
                     "error": None, "meta": {}}
 
     # --------------------------------------------------------------- calls
