@@ -78,7 +78,8 @@ class BaseDriver(ABC):
                 "capture backend cannot fit this region within the configured area cap because it cannot set canvas height",
                 code="backend_unavailable",
             )
-        return self.capture(bbox, canvas_width, format, quality, grayscale)
+        return self.capture(bbox=bbox, canvas_width=canvas_width, format=format,
+                            quality=quality, grayscale=grayscale)
 
     # ------------------------------------------------------------- pointer
 

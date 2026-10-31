@@ -451,7 +451,7 @@ class TestCaptureAreaCap(unittest.TestCase):
         class LegacyCaptureDriver(BaseDriver):
             capabilities = {"capture": True}
 
-            def capture(self, bbox, canvas_width, format="png", quality=85, grayscale=False):
+            def capture(self, *, bbox, canvas_width, format="png", quality=85, grayscale=False):
                 left, top, right, bottom = bbox
                 height = max(1, int(round((bottom - top) * canvas_width / max(right - left, 1))))
                 return CapturePayload(b"capture", canvas_width, height, format)
@@ -475,7 +475,7 @@ class TestCaptureAreaCap(unittest.TestCase):
         class LegacyCaptureDriver(BaseDriver):
             capabilities = {"capture": True}
 
-            def capture(self, bbox, canvas_width, format="png", quality=85, grayscale=False):
+            def capture(self, *, bbox, canvas_width, format="png", quality=85, grayscale=False):
                 left, top, right, bottom = bbox
                 height = max(1, int(round((bottom - top) * canvas_width / max(right - left, 1))))
                 return CapturePayload(b"capture", canvas_width, height, format)
