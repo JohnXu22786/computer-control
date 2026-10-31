@@ -460,7 +460,7 @@ def risk_for(tool: str, arguments: Optional[dict] = None) -> str:
         keys = arguments.get("keys") or []
         if isinstance(keys, str):
             keys = keys.split("+")
-        lowered = {str(k).lower() for k in keys}
+        lowered = {str(k).strip().lower() for k in keys}
         if lowered & _WIN_LIKE or (lowered & _CTRL_LIKE and lowered & _ALT_LIKE):
             risk = RISK_HIGH
     elif tool == "batch.execute":
