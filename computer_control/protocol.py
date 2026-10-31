@@ -22,6 +22,7 @@ Events are JSON-RPC notifications:
 from __future__ import annotations
 
 import json
+import math
 import threading
 from typing import Callable, Optional
 
@@ -59,6 +60,14 @@ def load_request(line: bytes):
         raise ProtocolError("parse error: %s" % exc, PARSE_ERROR)
     if not isinstance(request, dict):
         raise ProtocolError("request must be a JSON object", INVALID_REQUEST)
+    if "id" in request:
+        request_id = request["id"]
+        if request_id is not None and (
+            isinstance(request_id, bool)
+            or not isinstance(request_id, (str, int, float))
+            or isinstance(request_id, float) and not math.isfinite(request_id)
+        ):
+            raise ProtocolError("'id' must be a string, number, or null", INVALID_REQUEST)
     if request.get("jsonrpc") != "2.0":
         raise ProtocolError("missing or invalid 'jsonrpc' field", INVALID_REQUEST)
     method = request.get("method")
