@@ -228,6 +228,28 @@ class TestErrors(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertEqual(r["error"]["code"], "invalid_arguments")
 
+    def test_dummy_a11y_snapshot_rects_use_right_and_bottom_edges(self):
+        engine, _, _, _, _ = make_engine()
+        snap = engine.run_tool("a11y.snapshot", {"level": "full"})
+        self.assertTrue(snap["ok"], snap)
+
+        children = snap["result"]["tree"]["children"]
+        self.assertEqual(children[1]["rect"], [220, 10, 280, 38])
+        self.assertEqual(children[2]["children"][0]["rect"], [10, 50, 310, 70])
+        self.assertEqual(children[2]["children"][1]["rect"], [10, 72, 310, 92])
+
+    def test_dummy_a11y_pointer_activation_uses_button_center(self):
+        engine, _, _, _, _ = make_engine()
+        snap = engine.run_tool("a11y.snapshot", {})
+        result = engine.run_tool("a11y.activate", {
+            "snapshot_id": snap["result"]["snapshot_id"],
+            "node_id": 3,
+            "method": "pointer",
+        })
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["result"]["position"], {"x": 250.0, "y": 24.0})
+
 
 class TestConfirmation(unittest.TestCase):
     def test_padded_win_alias_requires_confirmation_at_default_threshold(self):
