@@ -176,13 +176,15 @@ class Router:
                     "meta": {}}
 
     def _session_start(self, params):
-        return self._guard(lambda: self._get_session().start(params.get("config") or params), params)
+        config = params["config"] if "config" in params else params
+        return self._guard(lambda: self._get_session().start(config), params)
 
     def _session_stop(self, params):
         return self._guard(self._get_session().stop, params)
 
     def _session_configure(self, params):
-        return self._guard(lambda: self._get_session().configure(params.get("patch") or params), params)
+        patch = params["patch"] if "patch" in params else params
+        return self._guard(lambda: self._get_session().configure(patch), params)
 
     def _session_confirm(self, params):
         request_id = params.get("request_id")
