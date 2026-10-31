@@ -369,7 +369,7 @@ def clean_arguments(tool: str, raw_args) -> dict:
     spec = get_spec(tool)
     if spec is None:
         raise ValidationError(["unknown tool %r" % tool])
-    if raw_args is None:
+    if raw_args is None and tool != "screen.capture":
         raw_args = {}
     if not isinstance(raw_args, dict):
         raise ValidationError(["arguments must be an object"])
