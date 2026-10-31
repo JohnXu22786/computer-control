@@ -98,6 +98,40 @@ class TestLifecycle(RouterFixture):
             "result": {"value": "handled"},
         })
 
+    def test_invalid_id_types_are_rejected_before_dispatch(self):
+        calls = []
+        self.router._handlers["test.echo"] = lambda params: calls.append(params) or {"ok": True}
+
+        for invalid_id in ([], {}, True, False, float("nan"), float("inf"), float("-inf")):
+            with self.subTest(id=invalid_id):
+                request = json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": invalid_id,
+                    "method": "test.echo",
+                }).encode("utf-8")
+                with self.assertRaises(ProtocolError) as raised:
+                    self.router.handle_line(request)
+                self.assertEqual(raised.exception.code, -32600)
+
+        self.assertEqual(calls, [])
+
+    def test_string_and_number_ids_are_preserved(self):
+        calls = []
+        self.router._handlers["test.echo"] = lambda params: calls.append(params) or {"ok": True}
+
+        for request_id in ("request-1", 2.5):
+            with self.subTest(id=request_id):
+                request = json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "test.echo",
+                }).encode("utf-8")
+                response = self.router.handle_line(request)
+                self.assertEqual(response["id"], request_id)
+                self.assertEqual(response["result"], {"ok": True})
+
+        self.assertEqual(len(calls), 2)
+
     def test_call_before_start(self):
         response = self.call("tools.call", {"tool": "screen.capture", "arguments": {}})
         self.assertFalse(response["result"]["ok"])
