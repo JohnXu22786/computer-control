@@ -230,6 +230,24 @@ class TestTools(RouterFixture):
         self.assertIn("action.started", types)
         self.assertIn("action.finished", types)
 
+    def test_falsey_non_object_arguments_are_rejected_before_driver_call(self):
+        self.start_session()
+
+        for arguments in ([], False, 0, ""):
+            with self.subTest(arguments=arguments):
+                response = self.call("tools.call", {
+                    "tool": "screen.capture",
+                    "arguments": arguments,
+                })
+
+                self.assertFalse(response["result"]["ok"])
+                self.assertEqual(response["result"]["error"]["code"], "invalid_arguments")
+                self.assertEqual(self.driver_log(), [])
+
+        response = self.call("tools.call", {"tool": "screen.capture"})
+        self.assertTrue(response["result"]["ok"])
+        self.assertEqual([entry["kind"] for entry in self.driver_log()], ["capture"])
+
     def test_call_batch(self):
         self.start_session()
         r = self.call("tools.call_batch", {
