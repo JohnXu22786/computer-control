@@ -277,7 +277,7 @@ def _coerce(param: ParamSpec, raw, issues: List[str], tool: str) -> Any:
             return None
         try:
             value = float(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             issues.append("%s: expected a number, got %r" % (param.name, raw))
             return None
         if not _isfinite(value):
@@ -320,10 +320,15 @@ def _coerce(param: ParamSpec, raw, issues: List[str], tool: str) -> Any:
         for key, value in raw.items():
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 issues.append("%s.%s: expected a number" % (param.name, key))
-            elif not _isfinite(float(value)):
-                issues.append("%s.%s: expected a finite number" % (param.name, key))
             else:
-                valid_numbers.add(key)
+                try:
+                    finite = _isfinite(float(value))
+                except OverflowError:
+                    finite = False
+                if not finite:
+                    issues.append("%s.%s: expected a finite number" % (param.name, key))
+                else:
+                    valid_numbers.add(key)
         if "width" in valid_numbers and raw["width"] <= 0:
             issues.append("%s.width must be positive" % param.name)
         if "height" in valid_numbers and raw["height"] <= 0:
