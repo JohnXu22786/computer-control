@@ -428,34 +428,35 @@ def clean_arguments(tool: str, raw_args, _batch_depth: int = 0) -> dict:
         if isinstance(text, str) and len(text) > 10000:
             issues.append("text: too long (%d characters, max 10000)" % len(text))
     elif tool == "batch.execute":
-        items = cleaned.get("items") or []
+        items = cleaned.get("items")
         if _batch_depth >= MAX_BATCH_NESTING:
             issues.append("batch nesting exceeds maximum depth (%d)" % MAX_BATCH_NESTING)
-        elif not items:
-            issues.append("items: must contain at least one action")
-        else:
-            sub_issues = []
-            for i, item in enumerate(items):
-                if not isinstance(item, dict):
-                    sub_issues.append("items[%d]: must be an object {tool, arguments}" % i)
-                    continue
-                item_tool = item.get("tool")
-                if not isinstance(item_tool, str) or not item_tool:
-                    sub_issues.append("items[%d]: missing tool" % i)
-                    continue
-                # unknown tools are allowed here; run_batch reports them as
-                # per-item failures so a batch can continue past them
-                if get_spec(item_tool) is not None:
-                    try:
-                        clean_arguments(
-                            item_tool,
-                            item.get("arguments"),
-                            _batch_depth + (item_tool == "batch.execute"),
-                        )
-                    except ValidationError as exc:
-                        for issue in exc.issues:
-                            sub_issues.append("items[%d]: %s" % (i, issue))
-            issues.extend(sub_issues)
+        elif isinstance(items, list):
+            if not items:
+                issues.append("items: must contain at least one action")
+            else:
+                sub_issues = []
+                for i, item in enumerate(items):
+                    if not isinstance(item, dict):
+                        sub_issues.append("items[%d]: must be an object {tool, arguments}" % i)
+                        continue
+                    item_tool = item.get("tool")
+                    if not isinstance(item_tool, str) or not item_tool:
+                        sub_issues.append("items[%d]: missing tool" % i)
+                        continue
+                    # unknown tools are allowed here; run_batch reports them as
+                    # per-item failures so a batch can continue past them
+                    if get_spec(item_tool) is not None:
+                        try:
+                            clean_arguments(
+                                item_tool,
+                                item.get("arguments"),
+                                _batch_depth + (item_tool == "batch.execute"),
+                            )
+                        except ValidationError as exc:
+                            for issue in exc.issues:
+                                sub_issues.append("items[%d]: %s" % (i, issue))
+                issues.extend(sub_issues)
     elif tool == "a11y.activate":
         if cleaned.get("method") == "pointer" and cleaned.get("snapshot_id") is None:
             issues.append("snapshot_id is required even for pointer method (staleness guard)")
