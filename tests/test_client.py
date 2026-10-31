@@ -264,6 +264,27 @@ class TestHttpClient(unittest.TestCase):
             if client is not None:
                 client.close()
 
+    def test_http_client_delivers_crlf_framed_sse_event(self):
+        class EventResponse:
+            def __init__(self):
+                self.data = iter(b'data: {"type": "crlf"}\r\n\r\n')
+                self.fp = self
+
+            def read(self, size):
+                return bytes([next(self.data)]) if self.data else b""
+
+            def close(self):
+                pass
+
+        client = None
+        try:
+            with patch("computer_control.client.urllib.request.urlopen", return_value=EventResponse()):
+                client = HttpClient("http://example.test", timeout=1)
+                self.assertEqual(client.events(timeout=2)["type"], "crlf")
+        finally:
+            if client is not None:
+                client.close()
+
     def test_http_client_close_stops_sse_retries(self):
         import urllib.error
 

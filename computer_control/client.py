@@ -208,7 +208,7 @@ class HttpClient(_BaseClient):
                     if not chunk:
                         break
                     buffer += chunk
-                    if buffer.endswith(b"\n\n"):
+                    if buffer.endswith((b"\n\n", b"\r\n\r\n")):
                         self._dispatch_sse(buffer)
                         buffer = b""
             except Exception:
