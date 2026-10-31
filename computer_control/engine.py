@@ -152,18 +152,19 @@ class Engine:
         if not self._driver.capabilities.get("capture"):
             return self._fail("backend_unavailable",
                               "capture backend is not available on this platform", tool="screen.capture")
-        scale = args.get("scale") or 1.0
-        canvas_width = max(1, int(round(self._surface.canvas_width * scale)))
-        canvas_width = self._fit_max_area(canvas_width)
         try:
             bbox = self._surface.region_to_physical_bbox(args.get("region"))
         except ValueError as exc:
             return self._fail("invalid_arguments", str(exc), tool="screen.capture")
+        scale = args.get("scale") or 1.0
+        canvas_width = max(1, int(round(self._surface.canvas_width * scale)))
+        canvas_width, canvas_height = self._fit_max_area(canvas_width, bbox)
         try:
-            payload = self._driver.capture(bbox=bbox, canvas_width=canvas_width,
-                                           format=args.get("format") or "png",
-                                           quality=args.get("quality") or 85,
-                                           grayscale=bool(args.get("grayscale")))
+            payload = self._driver.capture_with_dimensions(
+                bbox=bbox, canvas_width=canvas_width, canvas_height=canvas_height,
+                format=args.get("format") or "png",
+                quality=args.get("quality") or 85,
+                grayscale=bool(args.get("grayscale")))
         except DriverError as exc:
             return self._fail(exc.code, exc.message, tool="screen.capture", data=exc.data)
         self._frame += 1
@@ -179,16 +180,20 @@ class Engine:
             "canvas": self._surface.as_dict(),
         }, tool="screen.capture")
 
-    def _fit_max_area(self, canvas_width: int) -> int:
-        """Shrink the canvas so the resulting frame stays under the configured
-        pixel-area cap (token cost fuse)."""
+    def _fit_max_area(self, canvas_width: int, bbox: tuple) -> tuple:
+        """Fit the capture dimensions under the configured pixel-area cap."""
         max_area = self._get_cfg().capture.max_area
+        left, top, right, bottom = bbox
+        aspect = (bottom - top) / max(right - left, 1)
+        canvas_height = max(1, int(round(canvas_width * aspect)))
         if max_area <= 0:
-            return canvas_width
-        aspect = self._surface.physical_height / max(self._surface.physical_width, 1)
-        while canvas_width * int(round(canvas_width * aspect)) > max_area and canvas_width > 64:
-            canvas_width = max(64, int(canvas_width * 0.9))
-        return canvas_width
+            return canvas_width, canvas_height
+        while canvas_width * canvas_height > max_area and canvas_width > 1:
+            canvas_width = max(1, int(canvas_width * 0.9))
+            canvas_height = max(1, int(round(canvas_width * aspect)))
+        if canvas_width * canvas_height > max_area:
+            canvas_height = max_area // canvas_width
+        return canvas_width, canvas_height
 
     # pointer ---------------------------------------------------------------
 
