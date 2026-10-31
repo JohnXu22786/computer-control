@@ -390,6 +390,15 @@ class TestFraming(unittest.TestCase):
             self.assertEqual(resp["error"]["code"], -32600)
             self.assertIsNone(resp["id"])
 
+    def test_invalid_id_uses_null_in_error_response(self):
+        router = Router(lambda: Session(emit=lambda t, p=None: None, driver_factory=lambda cfg: NullDriver(enable_a11y=True)))
+        reader = FakeReader([b'{"jsonrpc":"2.0","id":true,"method":"system.status"}\n'])
+        writer = FakeWriter()
+        serve_stdio(router, reader, writer)
+        response = json.loads(writer.buffer.decode("utf-8").strip())
+        self.assertEqual(response["error"]["code"], -32600)
+        self.assertIsNone(response["id"])
+
     def test_invalid_jsonrpc_version_preserves_id(self):
         router = Router(lambda: Session(emit=lambda t, p=None: None, driver_factory=lambda cfg: NullDriver(enable_a11y=True)))
         reader = FakeReader([b'{"jsonrpc":"1.0","id":5,"method":"system.status"}\n'])
