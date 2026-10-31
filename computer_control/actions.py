@@ -12,7 +12,7 @@ import fnmatch
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
-from computer_control.keys import UnknownKeyError, parse_key
+from computer_control.keys import UnknownKeyError, parse_hotkey, parse_key
 
 RISK_BENIGN = "benign"
 RISK_MODERATE = "moderate"
@@ -301,7 +301,14 @@ def _coerce(param: ParamSpec, raw, issues: List[str], tool: str) -> Any:
         return raw
     if param.type == "list":
         if isinstance(raw, str):
-            raw = raw.split("+")
+            if tool == "keyboard.combo":
+                try:
+                    raw = parse_hotkey(raw)
+                except ValueError as exc:
+                    issues.append("%s: %s" % (param.name, exc))
+                    return None
+            else:
+                raw = raw.split("+")
         if not isinstance(raw, list) or not raw:
             issues.append("%s: expected a non-empty list" % param.name)
             return raw
