@@ -156,6 +156,21 @@ class TestTools(RouterFixture):
         self.assertEqual(r["result"]["error"]["code"], "invalid_arguments")
         self.assertIn("issues", r["result"]["error"]["data"])
 
+    def test_oversized_numeric_argument_is_invalid_arguments(self):
+        self.start_session()
+        calls = (
+            {"tool": "pointer.move", "arguments": {"x": 10 ** 400, "y": 1}},
+            {"tool": "screen.capture", "arguments": {
+                "region": {"x": 10 ** 400, "y": 0, "width": 1, "height": 1},
+            }},
+        )
+        for params in calls:
+            with self.subTest(tool=params["tool"]):
+                r = self.call("tools.call", params)
+                self.assertFalse(r["result"]["ok"])
+                self.assertEqual(r["result"]["error"]["code"], "invalid_arguments")
+                self.assertIn("issues", r["result"]["error"]["data"])
+
     def test_unknown_tool(self):
         self.start_session()
         r = self.call("tools.call", {"tool": "mystery", "arguments": {}})
