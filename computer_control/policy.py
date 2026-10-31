@@ -14,6 +14,7 @@ standby after inactivity.
 
 from __future__ import annotations
 
+import copy
 import os
 import threading
 import time
@@ -422,10 +423,11 @@ class SafetyGate:
 
     def _create_pending_locked(self, tool: str, arguments: dict, risk: str) -> PendingConfirmation:
         request_id = "cfm-%s" % uuid.uuid4().hex[:12]
+        arguments_snapshot = copy.deepcopy(arguments)
         pending = PendingConfirmation(
             request_id=request_id,
             tool=tool,
-            arguments=arguments,
+            arguments=arguments_snapshot,
             risk=risk,
             reason="risk %s >= confirm threshold %s" % (risk, self._cfg.confirm_threshold),
             created_at=time.monotonic(),
@@ -435,7 +437,7 @@ class SafetyGate:
         self._emit("safety.confirmation_requested", {
             "request_id": request_id,
             "tool": tool,
-            "arguments": arguments,
+            "arguments": copy.deepcopy(arguments_snapshot),
             "risk": risk,
             "reason": pending.reason,
             "expires_at": pending.expires_at,

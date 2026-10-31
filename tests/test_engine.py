@@ -228,6 +228,21 @@ class TestConfirmation(unittest.TestCase):
         combos = [e for e in driver.log() if e["kind"] == "combo"]
         self.assertEqual(combos, [{"kind": "combo", "keys": ["win", "r"]}])
 
+    def test_mutating_caller_arguments_does_not_change_approved_action(self):
+        engine, driver, gate, _, _ = make_engine({"safety": {"confirm_threshold": "moderate"}})
+        keys = ["win", "r"]
+        arguments = {"keys": keys}
+
+        result = engine.run_tool("keyboard.combo", arguments)
+        self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+        keys[:] = ["ctrl", "c"]
+        arguments["keys"] = ["alt", "f4"]
+
+        gate.resolve(result["result"]["request_id"], approve=True)
+
+        combos = [e for e in driver.log() if e["kind"] == "combo"]
+        self.assertEqual(combos, [{"kind": "combo", "keys": ["win", "r"]}])
+
     def test_deny_does_not_execute(self):
         engine, driver, gate, _, _ = make_engine({"safety": {"confirm_threshold": "moderate"}})
         r = engine.run_tool("keyboard.combo", {"keys": ["win", "r"]})
