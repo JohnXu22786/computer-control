@@ -10,6 +10,13 @@ It enforces, in order:
   4. risk confirmation  - actions at or above the configured risk threshold
                           wait for a human approval before they may run
 
+A dedicated admission lock makes the final authorization check and the action
+dispatch atomic against grant changes: ``execute_admitted`` holds it across
+check + execution, and ``set_grant``/``reconfigure`` hold it across the grant
+mutation, so a downgrade can never land between the two. It deliberately is
+not the gate lock itself - the gate lock stays free for the emergency stop,
+the hotkey poll and the idle watchdog while a (possibly long) action runs.
+
 It also owns the emergency-stop machinery (hotkey polling, panic file,
 protocol-triggered panic) and the idle watchdog that puts the session into
 standby after inactivity.
@@ -168,6 +175,9 @@ class SafetyGate:
         self._emit = emit
         self._hotkey_probe = driver_hotkey_probe
         self._lock = threading.RLock()
+        # Serializes grant mutations against execute_admitted's check+dispatch
+        # pair. Lock order everywhere: admission -> gate lock.
+        self._admission_lock = threading.RLock()
         self._state = _STATE_READY
         self._grant = cfg.auth_profile
         self._last_rule = None
@@ -419,6 +429,21 @@ class SafetyGate:
                                    risk=self.risk_for(tool, arguments))
             return GateVerdict("allow", risk=self.risk_for(tool, arguments))
 
+    def execute_admitted(self, tool: str, arguments: dict, runner):
+        """Final authorization check and dispatch, atomic against grant changes.
+
+        The check and ``runner`` run under the same admission lock that
+        ``set_grant``/``reconfigure`` acquire, so a ``session.configure`` or
+        ``grant_profile`` cannot land a grant change between the check and the
+        dispatch. Returns ``(verdict, result)``; ``result`` is None when the
+        verdict is not ``allow``.
+        """
+        with self._admission_lock:
+            verdict = self.evaluate_allow_only(tool, arguments)
+            if verdict.decision != "allow":
+                return verdict, None
+            return verdict, runner()
+
     def _check_grant_locked(self, tool: str) -> Optional[str]:
         """Authorization profile check - the orthogonal axis to the operational
         state. Returns _NOT_AUTHORIZED or None, and never touches _state.
@@ -554,9 +579,14 @@ class SafetyGate:
                 "approve": approve,
                 "tool": pending.tool,
             })
-            if approve and self.on_approved is not None:
-                self.on_approved(pending)
-            return pending
+            callback = self.on_approved if approve else None
+        if callback is not None:
+            # Outside the gate lock: the callback leads to execution, which
+            # takes the admission lock. Calling it under the gate lock would
+            # nest gate -> admission and deadlock against set_grant's
+            # admission -> gate order.
+            callback(pending)
+        return pending
 
     def pending_confirmation(self) -> Optional[PendingConfirmation]:
         with self._lock:
@@ -567,30 +597,72 @@ class SafetyGate:
     def set_grant(self, profile: str) -> None:
         """Change the authorization profile on a live gate.
 
-        A downgrade cancels a pending confirmation whose tool the new profile
-        no longer authorizes: authority was withdrawn, so an approval collected
-        earlier must not run. Entering 'revoked' cancels the pending
+        A downgrade cancels a pending confirmation the new profile no longer
+        authorizes: authority was withdrawn, so an approval collected earlier
+        must not run. For a pending ``batch.execute`` this looks through the
+        stashed payload - if any sub-action is no longer authorized, the whole
+        batch confirmation is cancelled. Entering 'revoked' cancels the pending
         confirmation unconditionally - it bites harder on the way in. The
         operational state is left alone - revoked is a capability rung, not a
         state, so a revoked session still reports 'ready'.
+
+        The grant mutation holds the admission lock, so it cannot land between
+        an action's final check and its dispatch.
         """
-        with self._lock:
-            if profile == self._grant:
-                return
-            self._grant = profile
-            if profile == _GRANT_REVOKED:
-                self._cancel_pending_locked("cancelled by authorization revoke")
-                return
-            pending = self._pending
-            if (pending is not None and pending.status == "pending"
-                    and self._check_grant_locked(pending.tool) is not None):
-                self._cancel_pending_locked("cancelled by authorization downgrade")
+        with self._admission_lock:
+            with self._lock:
+                self._set_grant_locked(profile)
+
+    def _set_grant_locked(self, profile: str) -> None:
+        if profile == self._grant:
+            return
+        self._grant = profile
+        if profile == _GRANT_REVOKED:
+            self._cancel_pending_locked("cancelled by authorization revoke")
+            return
+        pending = self._pending
+        if (pending is not None and pending.status == "pending"
+                and self._pending_blocked_by_grant_locked(pending)):
+            self._cancel_pending_locked("cancelled by authorization downgrade")
+
+    def _pending_blocked_by_grant_locked(self, pending: PendingConfirmation) -> bool:
+        if self._check_grant_locked(pending.tool) is not None:
+            return True
+        if pending.tool != "batch.execute":
+            return False
+        # batch.execute itself is never refused by 'limited', so a mixed batch
+        # could smuggle keyboard items past a downgrade unless the sub-actions
+        # are checked too.
+        for tool in _batch_subtool_names(pending):
+            if self._check_grant_locked(tool) is not None:
+                return True
+        return False
 
     def reconfigure(self, cfg: SafetyConfig) -> None:
-        with self._lock:
-            self._cfg = cfg
-            self._hotkey_names = _parse_hotkey_spec(cfg.emergency_hotkey)
-            self.set_grant(cfg.auth_profile)
+        with self._admission_lock:
+            with self._lock:
+                self._cfg = cfg
+                self._hotkey_names = _parse_hotkey_spec(cfg.emergency_hotkey)
+                self._set_grant_locked(cfg.auth_profile)
+
+
+def _batch_subtool_names(pending: PendingConfirmation) -> List[str]:
+    """Sub-action tool names of a pending batch confirmation: the stashed plan
+    when available (only 'run' entries execute), otherwise the raw items, so a
+    downgrade landing before the engine stashed the payload still sees the
+    sub-tools."""
+    payload = pending.payload
+    if payload:
+        names = []
+        for entry in payload.get("items") or []:
+            if isinstance(entry, (list, tuple)) and entry and entry[0] == "run":
+                names.append(entry[1])
+        return names
+    names = []
+    for item in (pending.arguments or {}).get("items") or []:
+        if isinstance(item, dict) and item.get("tool"):
+            names.append(item["tool"])
+    return names
 
 
 def _parse_hotkey_spec(spec: str) -> List[str]:

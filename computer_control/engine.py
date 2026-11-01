@@ -133,23 +133,29 @@ class Engine:
             })
 
     def _execute(self, tool: str, args: dict) -> ResultDict:
+        started = time.monotonic()
+
+        def admitted():
+            self._emit("action.started", {"tool": tool, "arguments": args})
+            try:
+                with self._execution_lock:
+                    result = self._dispatch(tool, args)
+                self._gate.note_activity()
+            except DriverError as exc:
+                result = self._fail(exc.code, exc.message, tool=tool, data=exc.data)
+            except Exception as exc:  # defensive: drivers must not take the server down
+                result = self._fail("driver_failed", "unexpected driver error: %s" % exc, tool=tool)
+            return result
+
         # Every execution - plain, batch-internal, or confirmation-approved -
-        # passes the gate again right here. An approval (or a batch pre-scan)
-        # may have been collected before the host narrowed the authorization
-        # profile; re-evaluating closes that race.
-        verdict = self._gate.evaluate_allow_only(tool, args)
+        # passes the gate again right here. The final check and the dispatch
+        # run under the gate's admission lock, so a session.configure /
+        # grant_profile cannot land a downgrade between the two: an approval
+        # (or a batch pre-scan) collected before the host narrowed the
+        # authorization profile is refused here instead of executing.
+        verdict, result = self._gate.execute_admitted(tool, args, admitted)
         if verdict.decision != "allow":
             return self._verdict_failure(verdict, tool)
-        started = time.monotonic()
-        self._emit("action.started", {"tool": tool, "arguments": args})
-        try:
-            with self._execution_lock:
-                result = self._dispatch(tool, args)
-            self._gate.note_activity()
-        except DriverError as exc:
-            result = self._fail(exc.code, exc.message, tool=tool, data=exc.data)
-        except Exception as exc:  # defensive: drivers must not take the server down
-            result = self._fail("driver_failed", "unexpected driver error: %s" % exc, tool=tool)
         duration_ms = int((time.monotonic() - started) * 1000)
         self._emit("action.finished", {
             "tool": tool,

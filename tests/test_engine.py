@@ -1,6 +1,7 @@
 """Unit tests for the engine: execution, coordinate mapping, policy interaction,
 confirmation flow, batch semantics and snapshot staleness."""
 
+import threading
 import time
 import unittest
 
@@ -372,6 +373,100 @@ class TestApprovalRace(unittest.TestCase):
         self.assertEqual(items[0]["error"]["code"], "not_authorized")
         self.assertEqual(items[0]["error"]["data"]["auth_profile"], "read_only")
         self.assertEqual([e for e in driver.log() if e["kind"] == "combo"], [])
+
+    def test_downgrade_cancels_pending_batch_confirmation_deep(self):
+        # A mixed batch pending at full must not survive a downgrade to
+        # limited just because batch.execute itself is not a keyboard tool.
+        engine, driver, gate, emit, _ = make_engine({"safety": {"confirm_threshold": "moderate"}})
+        r = engine.run_tool("batch.execute", {
+            "items": [
+                {"tool": "pointer.click", "arguments": {"button": "left"}},
+                {"tool": "keyboard.combo", "arguments": {"keys": ["ctrl", "c"]}},
+            ],
+        })
+        self.assertEqual(r["result"]["status"], "awaiting_confirmation")
+        rid = r["result"]["request_id"]
+        gate.set_grant("limited")
+        self.assertIsNone(gate.pending_confirmation())
+        self.assertIn("safety.confirmation_resolved", emit.types())
+        with self.assertRaises(Exception) as ctx:
+            gate.resolve(rid, approve=True)
+        self.assertEqual(getattr(ctx.exception, "code", None), "confirmation_not_found")
+        self.assertEqual(driver.log(), [])
+
+
+class TestAdmissionAtomicity(unittest.TestCase):
+    """The final authorization check and the dispatch are atomic with respect
+    to grant changes: a downgrade can never land between them."""
+
+    def test_downgrade_cannot_land_between_check_and_dispatch(self):
+        engine, driver, gate, _, _ = make_engine()
+        entered = threading.Event()
+        release = threading.Event()
+        real_dispatch = engine._dispatch
+
+        def blocked_dispatch(tool, args):
+            entered.set()
+            release.wait(timeout=5.0)
+            return real_dispatch(tool, args)
+
+        engine._dispatch = blocked_dispatch
+        results = {}
+        action_thread = threading.Thread(
+            target=lambda: results.update(r=engine.run_tool("pointer.click", {"button": "left"})))
+        action_thread.start()
+        self.assertTrue(entered.wait(2.0), "action never reached dispatch")
+
+        grant_started = threading.Event()
+        grant_done = threading.Event()
+
+        def downgrade():
+            grant_started.set()
+            gate.set_grant("read_only")
+            grant_done.set()
+
+        grant_thread = threading.Thread(target=downgrade)
+        grant_thread.start()
+        self.assertTrue(grant_started.wait(2.0), "downgrade never started")
+        # the action has passed its final check and sits between check and
+        # dispatch completion; the downgrade must not take effect in that
+        # window - it waits on the admission lock instead
+        self.assertFalse(grant_done.wait(0.3), "downgrade landed mid-dispatch")
+
+        release.set()
+        action_thread.join(5.0)
+        grant_thread.join(5.0)
+        self.assertFalse(action_thread.is_alive(), "action thread still running")
+        self.assertTrue(results["r"]["ok"], results["r"])
+        self.assertEqual(len([e for e in driver.log() if e["kind"] == "click"]), 1)
+        self.assertTrue(grant_done.is_set(), "downgrade never completed")
+        # once the downgrade has landed, the same action is refused outright
+        r2 = engine.run_tool("pointer.click", {"button": "left"})
+        self.assertFalse(r2["ok"])
+        self.assertEqual(r2["error"]["code"], "not_authorized")
+        self.assertEqual(r2["error"]["data"]["auth_profile"], "read_only")
+
+    def test_downgrade_that_wins_the_lock_intercepts_the_action(self):
+        # The other arm of the race: the downgrade lands first (here it wins
+        # the admission lock while the action is parked before its final
+        # check), and the pending execution is refused instead of running.
+        engine, driver, gate, _, _ = make_engine()
+        gate._admission_lock.acquire()
+        try:
+            results = {}
+            action_thread = threading.Thread(
+                target=lambda: results.update(r=engine.run_tool("pointer.click", {"button": "left"})))
+            action_thread.start()
+            gate.set_grant("read_only")  # same thread: reentrant, lands while parked
+        finally:
+            gate._admission_lock.release()
+        action_thread.join(5.0)
+        self.assertFalse(action_thread.is_alive())
+        r = results["r"]
+        self.assertFalse(r["ok"], r)
+        self.assertEqual(r["error"]["code"], "not_authorized")
+        self.assertEqual(r["error"]["data"]["auth_profile"], "read_only")
+        self.assertEqual(driver.log(), [])
 
 
 class TestWait(unittest.TestCase):

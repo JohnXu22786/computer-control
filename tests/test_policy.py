@@ -357,6 +357,72 @@ class TestAuthorizationProfiles(unittest.TestCase):
         self.assertIsNotNone(gate.pending_confirmation())
         self.assertEqual(gate.resolve(rid, approve=True).status, "approved")
 
+    def test_downgrade_cancels_pending_batch_confirmation_with_blocked_subaction(self):
+        # The pending tool is batch.execute, which 'limited' never refuses by
+        # itself; the downgrade must look through the payload and cancel when
+        # any sub-action is no longer authorized.
+        emit = EmitRecorder()
+        gate = make_gate({"safety": {"auth_profile": "full", "confirm_threshold": "moderate"}}, emit=emit)
+        v = gate.evaluate("batch.execute", {
+            "items": [
+                {"tool": "pointer.click", "arguments": {"button": "left"}},
+                {"tool": "keyboard.combo", "arguments": {"keys": ["ctrl", "c"]}},
+            ],
+        })
+        self.assertEqual(v.decision, "confirm")
+        rid = v.data["request_id"]
+        pending = gate.pending_confirmation()
+        pending.payload = {
+            "items": [("run", "pointer.click", {}), ("run", "keyboard.combo", {"keys": ["ctrl", "c"]})],
+            "continue_on_error": False,
+            "gap_ms": 0,
+        }
+        gate.set_grant("limited")  # keyboard.* is refused under limited
+        self.assertIsNone(gate.pending_confirmation())
+        self.assertIn("safety.confirmation_resolved", emit.types())
+        with self.assertRaises(PolicyError):
+            gate.resolve(rid, approve=True)
+
+    def test_downgrade_cancels_pending_batch_confirmation_before_payload_stashed(self):
+        # The engine stashes the plan right after evaluate returns; a downgrade
+        # landing in that gap must still see the sub-tools via the raw items.
+        emit = EmitRecorder()
+        gate = make_gate({"safety": {"auth_profile": "full", "confirm_threshold": "moderate"}}, emit=emit)
+        v = gate.evaluate("batch.execute", {
+            "items": [
+                {"tool": "pointer.click", "arguments": {}},
+                {"tool": "keyboard.type", "arguments": {"text": "hi"}},
+            ],
+        })
+        self.assertEqual(v.decision, "confirm")
+        rid = v.data["request_id"]
+        gate.set_grant("limited")
+        self.assertIsNone(gate.pending_confirmation())
+        self.assertIn("safety.confirmation_resolved", emit.types())
+        with self.assertRaises(PolicyError):
+            gate.resolve(rid, approve=True)
+
+    def test_downgrade_keeps_pending_batch_confirmation_all_subactions_allowed(self):
+        emit = EmitRecorder()
+        gate = make_gate({"safety": {"auth_profile": "full", "confirm_threshold": "moderate"}}, emit=emit)
+        v = gate.evaluate("batch.execute", {
+            "items": [
+                {"tool": "pointer.click", "arguments": {}},
+                {"tool": "wait.pause", "arguments": {"ms": 1}},
+            ],
+        })
+        self.assertEqual(v.decision, "confirm")
+        rid = v.data["request_id"]
+        pending = gate.pending_confirmation()
+        pending.payload = {
+            "items": [("run", "pointer.click", {}), ("run", "wait.pause", {"ms": 1})],
+            "continue_on_error": False,
+            "gap_ms": 0,
+        }
+        gate.set_grant("limited")  # pointer.* and wait.pause stay allowed
+        self.assertIsNotNone(gate.pending_confirmation())
+        self.assertEqual(gate.resolve(rid, approve=True).status, "approved")
+
     def test_reconfigure_to_revoked_cancels_pending_confirmation(self):
         # reconfigure is the funnel both channels go through.
         gate = make_gate({"safety": {"auth_profile": "limited", "confirm_threshold": "moderate"}})

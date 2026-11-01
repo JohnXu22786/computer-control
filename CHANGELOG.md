@@ -43,6 +43,19 @@ All notable changes are tracked here. Format loosely follows
   now carry the active profile in `error.data.auth_profile`, matching the
   batch path and the protocol docs, and `session.start` reports the effective
   `auth_profile`.
+- Closed the last two authorization boundaries. A downgrade now inspects a
+  pending `batch.execute` confirmation down to its sub-actions: the stashed
+  payload plan (or the raw items when the engine has not stashed it yet) is
+  scanned, and if any sub-action is no longer authorized under the new
+  profile the whole batch confirmation is cancelled - a mixed batch cannot
+  smuggle `keyboard.*` items past a narrowing to `limited`. The final
+  authorization check and the action dispatch are now atomic under a new
+  admission lock shared with `set_grant`/`reconfigure`, so a
+  `session.configure` or `grant_profile` cannot land a grant change between
+  the check and the execution (the gate lock itself stays free for the
+  emergency stop, hotkey polling and the idle watchdog while an action runs).
+  Confirmation approval callbacks now fire outside the gate lock to keep the
+  admission -> gate lock order deadlock-free.
 - Handled URLError, connection timeouts, and malformed JSON responses in `HttpClient` and `_BaseClient`, converting them into typed `ClientError` exceptions.
 - Added manifest validation regression test asserting complete parity between `manifest()` and `manifest.json`.
 - Aligned JSON-RPC 2.0 error codes to standard values (`-32603` for internal errors, `-32000` for server errors).
