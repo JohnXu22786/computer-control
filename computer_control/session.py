@@ -125,7 +125,7 @@ class Session:
             if self._profile_floor is not None and authorization_widens(self._profile_floor,
                                                                         base.safety.auth_profile):
                 base.safety.auth_profile = self._profile_floor
-            start_safety = (raw_config or {}).get("safety")
+            start_safety = raw_config.get("safety") if isinstance(raw_config, dict) else None
             requested = start_safety.get("auth_profile") if isinstance(start_safety, dict) else None
             if requested is not None:
                 self._reject_widening(base.safety.auth_profile, requested, "session.start")
