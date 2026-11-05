@@ -34,7 +34,7 @@ _EVENTS = [
     {"name": "session.idle", "summary": "No actions for the configured idle timeout; the session entered standby."},
     {"name": "action.started", "summary": "A tool call began executing."},
     {"name": "action.finished", "summary": "A tool call finished, with its result envelope."},
-    {"name": "batch.finished", "summary": "A batch completed with the aggregated results."},
+    {"name": "batch.finished", "summary": "A batch completed with its per-item result envelopes."},
     {"name": "safety.confirmation_requested", "summary": "A high-risk action is pending human approval; the harness must ask the user."},
     {"name": "safety.confirmation_resolved", "summary": "A pending confirmation was approved or denied."},
     {"name": "safety.confirmation_expired", "summary": "A pending confirmation timed out and was denied."},
