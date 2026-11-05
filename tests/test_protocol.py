@@ -336,6 +336,33 @@ class TestConfirmationOverProtocol(RouterFixture):
         self.assertTrue(wait_for(lambda: any(k["kind"] == "combo" for k in self.driver_log())))
         self.assertIn("batch.finished", self.event_types())
 
+    def test_approved_batch_event_includes_each_item_result(self):
+        self.start_session({"safety": {"confirm_threshold": "moderate"}})
+        r = self.call("tools.call_batch", {
+            "items": [
+                {"tool": "wait.pause", "arguments": {"ms": 1}},
+                {"tool": "unknown.tool", "arguments": {}},
+                {"tool": "keyboard.combo", "arguments": {"keys": ["win", "l"]}},
+            ],
+            "continue_on_error": True,
+        })
+        pending = r["result"]["result"]
+        self.assertEqual(pending["status"], "awaiting_confirmation")
+
+        self.call("session.confirm", {"request_id": pending["request_id"], "approve": True})
+        self.assertTrue(wait_for(lambda: any(event == "batch.finished" for event, _ in self.events)))
+        finished = next(payload for event, payload in self.events if event == "batch.finished")
+
+        self.assertEqual(finished["status"], "completed")
+        self.assertEqual(finished["items"], 3)
+        self.assertEqual(len(finished["results"]), 3)
+        self.assertTrue(finished["results"][0]["ok"])
+        self.assertEqual(finished["results"][0]["meta"]["tool"], "wait.pause")
+        self.assertFalse(finished["results"][1]["ok"])
+        self.assertEqual(finished["results"][1]["error"]["code"], "unknown_tool")
+        self.assertIn("tool", finished["results"][1]["error"]["message"])
+        self.assertTrue(finished["results"][2]["ok"])
+
     def test_busy_while_confirming(self):
         self.start_session({"safety": {"confirm_threshold": "moderate"}})
         self.call("tools.call", {"tool": "keyboard.combo", "arguments": {"keys": ["win", "r"]}})

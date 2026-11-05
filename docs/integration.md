@@ -56,7 +56,7 @@ screen.capture (验证结果，必要时重复)
 | `session.resumed` / `session.configured` | 恢复/重配 | 刷新状态展示 |
 | `session.idle` | 空闲超时进入待机 | 提示用户「已待机」，可自动或提示恢复 |
 | `action.started` / `action.finished` | 每个动作 | 记录动作轨迹；`finished` 带 ok 与耗时 |
-| `batch.finished` | 批量完成 | 记录批量结果 |
+| `batch.finished` | 批量完成 | 记录批量结果；`results` 包含每项的完整结果信封（成功结果、错误详情和元数据） |
 | `safety.confirmation_requested` | 高风险动作待批 | **弹出人工确认 UI**（见下） |
 | `safety.confirmation_resolved` | 已批复 | 关闭确认 UI |
 | `safety.confirmation_expired` | 超时未批（自动拒绝） | 提示已拒绝 |

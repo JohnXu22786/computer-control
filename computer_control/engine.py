@@ -448,7 +448,12 @@ class Engine:
                 status = "aborted"
                 break
         duration_ms = int((time.monotonic() - started) * 1000)
-        self._emit("batch.finished", {"status": status, "items": len(results), "duration_ms": duration_ms})
+        self._emit("batch.finished", {
+            "status": status,
+            "items": len(results),
+            "results": results,
+            "duration_ms": duration_ms,
+        })
         return self._ok({"status": status, "items": results}, tool="batch.execute")
 
     def _verdict_failure(self, verdict, tool: str) -> ResultDict:
