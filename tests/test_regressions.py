@@ -408,7 +408,10 @@ class TestGrantChannel(unittest.TestCase):
         try:
             session.start({})
             self.assertTrue(session.call("screen.capture", {})["ok"])
-            self.assertTrue(session.call("a11y.snapshot", {})["ok"])
+            # a11y.snapshot sits on the observation floor only with the
+            # host's explicit opt-in; revoked defaults to refusing it too
+            r = session.call("a11y.snapshot", {})
+            self.assertEqual((r.get("error") or {}).get("code"), "not_authorized")
             for tool, args in (("keyboard.type", {"text": "hi"}),
                                ("wait.pause", {"ms": 1}),
                                ("batch.execute", {"items": [{"tool": "pointer.click"}]})):
@@ -416,6 +419,62 @@ class TestGrantChannel(unittest.TestCase):
                 self.assertEqual((result.get("error") or {}).get("code"), "not_authorized", tool)
             self.assertEqual(session.state, "ready")
             self.assertEqual(session.status()["result"]["state"], "ready")
+        finally:
+            session.stop()
+
+    def test_revoked_session_a11y_snapshot_with_host_opt_in(self):
+        # The opt-in is a host-only safety key: it comes from the host's own
+        # config file (or the control channel), never from an in-band patch.
+        session = self.make({"safety": {"auth_profile": "revoked",
+                                        "a11y_snapshot_opt_in": True}})
+        try:
+            session.start({})
+            self.assertTrue(session.call("a11y.snapshot", {})["ok"])
+            # opting into observation does not un-revoke anything else
+            self.assertEqual((session.call("keyboard.type", {"text": "hi"}).get("error") or {})
+                             .get("code"), "not_authorized")
+        finally:
+            session.stop()
+
+    def test_host_only_safety_keys_rejected_in_band(self):
+        from computer_control.session import SessionError
+
+        # session.start config
+        session = self.make({"safety": {"auth_profile": "read_only"}})
+        with self.assertRaises(SessionError) as ctx:
+            session.start({"safety": {"a11y_snapshot_opt_in": True}})
+        self.assertEqual(ctx.exception.code, "invalid_config")
+        self.assertIsNone(session._gate)
+        # session.configure patch
+        session.start({})
+        try:
+            with self.assertRaises(SessionError) as ctx:
+                session.configure({"safety": {"a11y_snapshot_opt_in": True}})
+            self.assertEqual(ctx.exception.code, "invalid_config")
+            # and over the router as well
+            from computer_control.protocol import Router
+            router = Router(lambda: session)
+            response = router.handle({"jsonrpc": "2.0", "id": 1, "method": "session.configure",
+                                      "params": {"patch": {"safety": {"a11y_snapshot_opt_in": True}}}})
+            self.assertEqual("invalid_config", response["result"]["error"]["code"])
+        finally:
+            session.stop()
+
+    def test_apply_host_directive_flips_opt_in_and_profile(self):
+        session = self.make({"safety": {"auth_profile": "read_only"}})
+        try:
+            session.start({})
+            # a11y.snapshot is off under read_only by default
+            self.assertEqual((session.call("a11y.snapshot", {}).get("error") or {}).get("code"),
+                             "not_authorized")
+            result = session.apply_host_directive({"a11y_snapshot": True})
+            self.assertTrue(result["ok"])
+            self.assertTrue(session.call("a11y.snapshot", {})["ok"])
+            # the same directive path can widen the profile
+            result = session.apply_host_directive({"auth_profile": "full"})
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["result"]["auth_profile"], "full")
+            self.assertTrue(session.call("pointer.click", {})["ok"])
         finally:
             session.stop()
 
@@ -769,8 +828,25 @@ class TestStopSemantics(unittest.TestCase):
     def test_queued_task_answered_after_stop(self):
         # The worker is busy with a long first action while a second action
         # waits in the queue; stopping must answer the queued one immediately.
+        # Ordering is forced with events, not sleeps.
         results = {}
         import threading as _t
+
+        first_started = _t.Event()
+        second_queued = _t.Event()
+        original_run_tool = self.session._engine.run_tool
+        original_put = self.session._worker_queue.put
+
+        def blocked_run_tool(tool, arguments):
+            first_started.set()
+            return original_run_tool(tool, arguments)
+
+        def signal_put(task, *args, **kwargs):
+            outcome = original_put(task, *args, **kwargs)
+            second_queued.set()
+            return outcome
+
+        self.session._engine.run_tool = blocked_run_tool
 
         def submit_first():
             results["first"] = self.session.call("wait.pause", {"ms": 600})
@@ -779,11 +855,12 @@ class TestStopSemantics(unittest.TestCase):
             results["second"] = self.session.call("wait.pause", {"ms": 200})
 
         t1 = _t.Thread(target=submit_first)
-        t2 = _t.Thread(target=submit_second)
         t1.start()
-        time.sleep(0.05)  # first is now running on the worker
+        self.assertTrue(first_started.wait(2), "first action never started on the worker")
+        self.session._worker_queue.put = signal_put
+        t2 = _t.Thread(target=submit_second)
         t2.start()
-        time.sleep(0.05)  # second is queued behind it
+        self.assertTrue(second_queued.wait(2), "second action never reached the queue")
         self.session.stop()
         t1.join(timeout=5)
         t2.join(timeout=5)
@@ -854,19 +931,14 @@ class TestStopSemantics(unittest.TestCase):
             self.assertTrue(enqueue_started.wait(2))
 
             stop_thread.start()
-            # With admission serialized by the session lock, stop must wait
-            # until this put completes. On the buggy implementation it sets
-            # the stop flag and drains before the delayed put is released.
-            stop_started_before_admission = session._stop_requested.wait(0.1)
-            if stop_started_before_admission:
-                release_first.set()
-                first_thread.join(timeout=2)
-                stop_thread.join(timeout=2)
-                release_enqueue.set()
-            else:
-                release_enqueue.set()
-                self.assertTrue(wait_for(session._stop_requested.is_set, timeout=2))
-                release_first.set()
+            # Stop is serialized behind _submit's session lock (held while the
+            # second task's enqueue is parked): it cannot set the stop flag
+            # before the enqueue completes, so the enqueue is released first
+            # and the stop flag is then observed - deterministic order, no
+            # timing window.
+            release_enqueue.set()
+            self.assertTrue(wait_for(session._stop_requested.is_set, timeout=2))
+            release_first.set()
             first_thread.join(timeout=2)
             stop_thread.join(timeout=2)
             self.assertFalse(first_thread.is_alive())

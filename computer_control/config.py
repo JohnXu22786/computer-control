@@ -141,6 +141,12 @@ class SafetyConfig:
     default_rule: str = "allow"
     rules: List[RuleConfig] = field(default_factory=list)
     auth_profile: str = "full"
+    # Host-only: the explicit opt-in that lets a11y.snapshot run under the
+    # read_only / revoked profiles. Settable through the host's config file
+    # or the out-of-band control channel; rejected in any in-band patch
+    # (session.start config / session.configure patch) - an agent opting
+    # itself into deeper observation would defeat the point.
+    a11y_snapshot_opt_in: bool = False
 
 
 @dataclass
@@ -189,6 +195,7 @@ class Config:
                 "default_rule": self.safety.default_rule,
                 "rules": [r.as_dict() for r in self.safety.rules],
                 "auth_profile": self.safety.auth_profile,
+                "a11y_snapshot_opt_in": self.safety.a11y_snapshot_opt_in,
             },
             "a11y": {
                 "default_level": self.a11y.default_level,
@@ -288,7 +295,7 @@ def from_dict(data: dict) -> Config:
         raise ConfigError("safety must be an object")
     unknown = set(safety) - {"emergency_hotkey", "confirm_threshold", "confirm_timeout_s", "idle_timeout_s",
                              "idle_action", "panic_file", "visual_indicator", "default_rule", "rules",
-                             "auth_profile"}
+                             "auth_profile", "a11y_snapshot_opt_in"}
     if unknown:
         raise ConfigError("unknown safety option(s): %s" % ", ".join(sorted(unknown)))
     if "emergency_hotkey" in safety:
@@ -319,6 +326,9 @@ def from_dict(data: dict) -> Config:
         cfg.safety.rules = [_parse_rule(raw, i) for i, raw in enumerate(safety["rules"])]
     if "auth_profile" in safety:
         cfg.safety.auth_profile = _expect_enum(safety["auth_profile"], AUTH_PROFILES, "safety", "auth_profile")
+    if "a11y_snapshot_opt_in" in safety:
+        _expect_type(safety["a11y_snapshot_opt_in"], bool, "a boolean", "safety", "a11y_snapshot_opt_in")
+        cfg.safety.a11y_snapshot_opt_in = safety["a11y_snapshot_opt_in"]
 
     # a11y
     a11y = data.get("a11y", {})

@@ -16,8 +16,10 @@ State machine (visible via system.status / events):
 Authorization profiles (safety.auth_profile: read_only / limited / full /
 revoked) are a separate axis from the states above - they narrow which tools
 clear the gate. session.configure is reachable in-band, so it may only narrow
-(or hold) the profile; widening requires the host to call Session.grant_profile
-directly, which is deliberately not a routed RPC method. The monotonicity is
+(or hold) the profile; widening is host-only, via a direct Python call to
+Session.grant_profile (in-process embedding) or the out-of-band control-file
+channel (host_control) when the plugin runs as a stdio subprocess - neither
+is a routed RPC method. The monotonicity is
 sticky across restarts: the narrowest profile the in-band channel has reached
 bounds every later session.start on the same Session object, so stop+start
 cannot silently reload the wider profile from the host's config file.
@@ -50,6 +52,12 @@ _IMMUTABLE_FIELDS = {
     "capture": {"backend"},
     "safety": {"emergency_hotkey", "panic_file", "visual_indicator"},
 }
+
+# Host-only safety keys: they come from the host's own config file or the
+# out-of-band control channel (host_control), never from an in-band patch -
+# an agent opting itself into deeper a11y observation under a narrowed
+# profile would defeat the point of the profile.
+_HOST_ONLY_SAFETY_KEYS = frozenset({"a11y_snapshot_opt_in"})
 
 
 class SessionError(Exception):
@@ -126,6 +134,7 @@ class Session:
                                                                         base.safety.auth_profile):
                 base.safety.auth_profile = self._profile_floor
             start_safety = raw_config.get("safety") if isinstance(raw_config, dict) else None
+            self._reject_host_only_keys(start_safety, "session.start")
             requested = start_safety.get("auth_profile") if isinstance(start_safety, dict) else None
             if requested is not None:
                 self._reject_widening(base.safety.auth_profile, requested, "session.start")
@@ -250,7 +259,10 @@ class Session:
         Deliberately not routable: nothing in the protocol handler table may
         widen a profile, because being routable means the agent can reach it.
         ``actor`` only labels the audit event - the permission to widen comes
-        from this being a direct Python call the host makes itself.
+        from this being a direct Python call the host makes itself. For a
+        stdio-subprocess deployment the host cannot make this call; it uses
+        the control-file channel instead (host_control.HostControlChannel),
+        which funnels into apply_host_directive with the same semantics.
         """
         if new_profile not in AUTH_PROFILES:
             raise SessionError("invalid_config",
@@ -258,6 +270,37 @@ class Session:
                                % ("/".join(AUTH_PROFILES), new_profile))
         return self._configure({"safety": {"auth_profile": new_profile}},
                                allow_widen=True, actor=actor)
+
+    def apply_host_directive(self, directive: dict, actor: str = "host") -> dict:
+        """Apply one validated directive from the out-of-band host control
+        channel: ``auth_profile`` (any direction) and/or ``a11y_snapshot``
+        (the read-only-profiles opt-in).
+
+        Raises SessionError("not_started") when no session is running - the
+        channel treats that as "not now" and retries the directive until a
+        session is live.
+        """
+        safety = {}
+        if "auth_profile" in directive:
+            safety["auth_profile"] = directive["auth_profile"]
+        if "a11y_snapshot" in directive:
+            safety["a11y_snapshot_opt_in"] = bool(directive["a11y_snapshot"])
+        if not safety:
+            return {"ok": True, "result": {"state": self.state, "applied": {}},
+                    "error": None, "meta": {}}
+        return self._configure({"safety": safety}, allow_widen=True, actor=actor,
+                               host_only=True)
+
+    @staticmethod
+    def _reject_host_only_keys(safety_patch, channel: str) -> None:
+        if not isinstance(safety_patch, dict):
+            return
+        present = sorted(set(safety_patch) & _HOST_ONLY_SAFETY_KEYS)
+        if present:
+            raise SessionError("invalid_config",
+                               "%s may not set host-only option(s): %s; "
+                               "only the host's config file or the host control channel can"
+                               % (channel, ", ".join(present)))
 
     def _reject_widening(self, current: str, requested: str, channel: str) -> None:
         if requested not in AUTH_PROFILES:
@@ -270,12 +313,15 @@ class Session:
                                "the host must call Session.grant_profile"
                                % (channel, current, requested))
 
-    def _configure(self, patch: dict, allow_widen: bool, actor: str) -> dict:
+    def _configure(self, patch: dict, allow_widen: bool, actor: str,
+                   host_only: bool = False) -> dict:
         with self._lock:
             if self._gate is None:
                 raise SessionError("not_started", "no session is running")
             if not isinstance(patch, dict):
                 raise SessionError("invalid_config", "configuration patch must be an object")
+            if not host_only:
+                self._reject_host_only_keys((patch or {}).get("safety"), "session.configure")
             denied_sections = set(patch) - set(_CONFIGURABLE_KEYS)
             if denied_sections:
                 raise SessionError("invalid_config",

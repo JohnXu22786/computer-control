@@ -50,7 +50,9 @@ _NOT_AUTHORIZED = "not_authorized"
 
 # Observation-only surface for the read_only profile. 'system.status' is a
 # protocol method rather than a gated tool; it stays listed so the profile
-# reads as the intended capability set.
+# reads as the intended capability set. a11y.snapshot is listed as a floor
+# capability but additionally requires the host's explicit opt-in (see
+# _check_grant_locked).
 _READ_ONLY_TOOLS = frozenset({"screen.capture", "system.status", "a11y.snapshot"})
 
 # Aliases that refer to the same physical key must not be able to dodge risk
@@ -373,8 +375,8 @@ class SafetyGate:
 
     def _grant_deny_reason(self) -> str:
         if self._grant == _GRANT_REVOKED:
-            return ("authorization profile 'revoked' is active; observation tools still run, "
-                    "but only the host can grant a wider profile")
+            return ("authorization profile 'revoked' is active; screen capture and status still "
+                    "run, but only the host can grant a wider profile or opt a11y.snapshot back in")
         return ("action not permitted by authorization profile '%s'; requires the user to grant a wider profile"
                 % self._grant)
 
@@ -444,19 +446,43 @@ class SafetyGate:
                 return verdict, None
             return verdict, runner()
 
+    def admit_only(self, tool: str, arguments: dict) -> GateVerdict:
+        """Final authorization check under the admission lock, without holding
+        the lock across a dispatch.
+
+        Used for batch.execute: its dispatch is a loop of sub-actions that
+        each re-enter execute_admitted, so holding the admission lock across
+        the whole loop would starve set_grant/reconfigure until the batch
+        ended - every remaining item would escape a downgrade. With the check
+        scoped to the batch itself, the lock is free between items and the
+        per-item final check refuses anything the downgrade now blocks.
+        """
+        with self._admission_lock:
+            return self.evaluate_allow_only(tool, arguments)
+
     def _check_grant_locked(self, tool: str) -> Optional[str]:
         """Authorization profile check - the orthogonal axis to the operational
         state. Returns _NOT_AUTHORIZED or None, and never touches _state.
 
         'revoked' and 'read_only' share the observation floor: withdrawing
         authority must not blind the human deciding whether to hand it back.
-        revoked bites harder on the way in (a pending confirmation is cancelled,
-        see set_grant) and is the only rung an agent cannot climb back out of
+        a11y.snapshot sits on that floor only with the host's explicit
+        opt-in (safety.a11y_snapshot_opt_in, host-only settable) - the tree
+        exposes whatever text happens to be on screen, so a narrowed/withdrawn
+        profile defaults to refusing it. 'limited' blocks keyboard input and
+        its a11y equivalent (a11y.input types into focused nodes, i.e. it
+        injects text); everything else on the floor still runs. revoked bites
+        harder on the way in (a pending confirmation is cancelled, see
+        set_grant) and is the only rung an agent cannot climb back out of
         in-band.
         """
-        if self._grant in (_GRANT_REVOKED, _GRANT_READ_ONLY) and tool not in _READ_ONLY_TOOLS:
-            return _NOT_AUTHORIZED
-        if self._grant == _GRANT_LIMITED and tool.startswith("keyboard."):
+        if self._grant in (_GRANT_REVOKED, _GRANT_READ_ONLY):
+            if tool == "a11y.snapshot":
+                if not self._cfg.a11y_snapshot_opt_in:
+                    return _NOT_AUTHORIZED
+            elif tool not in _READ_ONLY_TOOLS:
+                return _NOT_AUTHORIZED
+        if self._grant == _GRANT_LIMITED and (tool.startswith("keyboard.") or tool == "a11y.input"):
             return _NOT_AUTHORIZED
         return None
 

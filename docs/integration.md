@@ -82,7 +82,7 @@ server → event action.started → event action.finished
 ```
 
 - 批复响应立即返回，被批准的动作在工作线程上与其他动作串行执行；事件顺序为 `confirmation_resolved` → `action.started` → `action.finished`。
-- 批准后、执行前若授权模式被降级/收回，该动作不会执行，而是发出 `action.finished`（`ok:false`、`error_code:not_authorized`）；宿主应据此刷新权限展示并提示用户。最终授权检查与派发在同一把 admission 锁内完成，`session.configure` / `grant_profile` 不可能插在两者之间。
+- 批准后、执行前若授权模式被降级/收回，该动作不会执行，而是发出 `action.finished`（`ok:false`、`error_code:not_authorized`）；宿主应据此刷新权限展示并提示用户。最终授权检查与派发在同一把 admission 锁内完成，`session.configure` / `grant_profile` / 控制文件通道（复用同一应用路径）不可能插在两者之间；批量每个 item 各自过锁，降级可以落在 item 之间。
 - 降级落在挂起的批量确认上时按**子动作**深检：批内任一子动作不再被新档位放行（如降级到 `limited` 后仍有 `keyboard.*`），整批确认被取消（发 `confirmation_resolved, approve:false`）。
 - 待批期间新动作一律返回 `busy`（先批复再继续）。
 - 超时（`safety.confirm_timeout_s`，默认 30s）自动拒绝并发出 `confirmation_expired`；之后用旧 id 批复返回 `confirmation_expired` 错误。
@@ -109,7 +109,24 @@ stopped / standby --session.resume（或热键）--> ready
 - `session.configure {capture|safety|a11y|runtime 的子集}` 运行时调整（规则、确认阈值、空闲超时等）；`platform`、热键、panic 文件、`capture.backend` 等不可运行时修改（返回 `invalid_config`）。
 - 规则可随时替换：`session.configure {safety: {rules: [...]}}`。
 
-## 7. 其他建议
+## 7. 宿主控制通道（带外档位变更）
+
+dsh 场景下插件是 **stdio 子进程**，宿主调不到 Python 方法 `Session.grant_profile`；而凡可经 JSON-RPC 路由的方法 agent 都触达得到，路由表里不能有任何扩权入口。宿主因此用**控制文件通道**改档位 / 开关 `a11y_snapshot`：
+
+- **启用**：启动时 `serve --control-file PATH`（或环境变量 `COMPUTER_CONTROL_CONTROL_FILE`）。dsh 场景最简单的接法是在 harness 环境里设该环境变量——`index.js` 派生子进程时未覆盖 env，父环境会原样继承；也可在 bundle 的 `entry.command` 里追加 `--control-file PATH`。通道只读该文件、每 0.1s 轮询一次，`session` 重启不丢已生效的 `seq`。
+- **指令格式**（宿主**原子替换**整个文件：同目录写临时文件后 `os.replace`）：
+  ```json
+  {"seq": 7, "auth_profile": "limited", "a11y_snapshot": true}
+  ```
+  - `seq`（必填，正整数，严格递增）：只有比上一次已生效值更大的 `seq` 才生效——**重授同一档位也要抬 seq**；旧文件内容重放是无害空操作。
+  - `auth_profile`（可选）：任意方向，宿主写文件本身就是授权。
+  - `a11y_snapshot`（可选）：即 `read_only` / `revoked` 下放行 `a11y.snapshot` 的宿主 opt-in（`safety.a11y_snapshot_opt_in`）。
+  - 内容非法（缺 `seq`、未知键、非法档位）直接忽略且**不消耗 seq**；无会话在运行时指令**挂起待用**，落到下一个启动的会话；**删除文件不等于收回授权**——收回必须显式写一条降档指令。
+- **生效确认**：档位变更发 `safety.grant_changed`（`from` / `to` / `actor:"host"` / `widened`）；纯 `a11y_snapshot` 开关发 `session.configured`（`patch.safety.a11y_snapshot_opt_in`）。收不到事件即未生效，宿主应抬 seq 重写。
+- **安全边界**：路径不出现在任何配置 schema、路由表、manifest 或事件里，agent 无法指名也无法重定向；插件自身没有可写任意文件的工具，agent 无法伪造指令。通道的授权资格 =「谁能写这个文件」，请把它放进**仅宿主用户可写**的目录（如用户配置目录），不要放世界可写的临时目录。
+- 事件流同时是**审计通道**：`safety.grant_changed` 里 `widened: true` 即宿主带外提权，建议 harness 记审计日志并向用户显著提示。
+
+## 8. 其他建议
 
 - **启动时**用 `tools.list` 检查各工具 `available` 标志（例如 UIA 缺失时 `a11y.*` 为 false），据此裁剪模型可见的工具集——能力广播，避免模型调用注定失败的工具。
 - 模型提示词建议包含：坐标必须在画布内；语义优先；每步截图自检；高风险动作会被人工确认，属正常现象。

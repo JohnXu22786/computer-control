@@ -96,13 +96,16 @@ class Router:
     emits; transports install it so events reach subscribers and the wire.
     ``base_config`` (raw dict, usually the plugin's config file) is the base
     that session.start parameters override. ``driver_factory`` lets tests
-    inject a recording driver.
+    inject a recording driver. ``control_file`` enables the out-of-band
+    host control channel (see host_control); ``log`` receives its diagnostics.
     """
 
     def __init__(self, session_factory: Optional[Callable[[], Session]] = None,
                  event_sink: Optional[Callable[[str, Optional[dict]], None]] = None,
                  base_config: Optional[dict] = None,
-                 driver_factory: Optional[Callable] = None):
+                 driver_factory: Optional[Callable] = None,
+                 control_file: Optional[str] = None,
+                 log: Optional[Callable[[str], None]] = None):
         self._event_sink = event_sink or (lambda event_type, payload=None: None)
         self._base_config = base_config or {}
         self._driver_factory = driver_factory
@@ -129,6 +132,31 @@ class Router:
             "tools.list": self._tools_list,
             "system.status": self._system_status,
         }
+        # Out-of-band host control channel (grant changes / host-only opts).
+        # Router-level, not session-level: its seq counter must survive
+        # session stop/start, and it applies to whichever session is live.
+        self._control_channel = None
+        if control_file:
+            from computer_control.host_control import HostControlChannel
+            self._control_channel = HostControlChannel(
+                control_file, self._apply_host_directive, log=log)
+            self._control_channel.start()
+
+    def close(self) -> None:
+        """Stop the control channel (if any). Sessions are left alone - the
+        transports own their lifecycle."""
+        channel = self._control_channel
+        self._control_channel = None
+        if channel is not None:
+            channel.close()
+
+    def _apply_host_directive(self, directive: dict) -> bool:
+        with self._session_lock:
+            session = self._session_cache
+        if session is None or not session.started:
+            return False  # stays pending; lands on the next live session
+        session.apply_host_directive(directive)
+        return True
 
     # ------------------------------------------------------------ dispatch
 

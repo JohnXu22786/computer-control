@@ -15,8 +15,11 @@ All notable changes are tracked here. Format loosely follows
   refused actions return a new `not_authorized` decision, reported with the
   active profile in `error.data.auth_profile`. `revoked` is the bottom rung of
   that ladder rather than a fifth state or another emergency stop: it keeps
-  the observation tools (`screen.capture`, `a11y.snapshot`) running, cancels a
-  pending confirmation the moment it is entered, and leaves `state` at `ready`.
+  `screen.capture` running, cancels a pending confirmation the moment it is
+  entered, and leaves `state` at `ready`. `limited` refuses every `keyboard.*`
+  action plus `a11y.input` (text injection into a focused node is
+  keyboard-equivalent); `read_only` and `revoked` admit `screen.capture`
+  unconditionally, and `a11y.snapshot` only after the host opts in.
 - Added the grant channel for changing a profile on a live session.
   `session.configure` is the agent-reachable path and may only narrow
   `safety.auth_profile` or hold it; any widening, including one step up out of
@@ -25,8 +28,24 @@ All notable changes are tracked here. Format loosely follows
   session, so stop-then-restart is not an escape hatch, and a runtime grant
   does not survive a restart. The host moves profiles in any direction with
   `Session.grant_profile(new_profile, actor="host")`, a direct Python call
-  deliberately absent from the JSON-RPC handler table. Each change emits a
-  `safety.grant_changed` event.
+  deliberately absent from the JSON-RPC handler table. Where the host cannot
+  make that call (the plugin runs as a stdio subprocess, as under dsh), the
+  same out-of-band authority now exists cross-process: `serve
+  --control-file PATH` (or the `COMPUTER_CONTROL_CONTROL_FILE` environment
+  variable) polls a host-written JSON directive
+  `{"seq": N, "auth_profile": ..., "a11y_snapshot": bool}`; only a `seq`
+  above the last applied one takes effect, so re-granting the same profile
+  means bumping the seq, invalid content is rejected without consuming the
+  seq, a directive that arrives while no session is live stays pending until
+  one is, and deleting the file is not a revoke. The path appears in no config
+  schema, handler table, manifest entry or event, so the agent can neither
+  name nor redirect the channel, and the plugin exposes no file-writing tool.
+  Each change emits a `safety.grant_changed` event.
+- Added `safety.a11y_snapshot_opt_in` (default `false`), the host-only key
+  that admits `a11y.snapshot` under `read_only` / `revoked`. It is settable
+  only through the host's config file or the control-file channel (`a11y_snapshot`
+  directive); any in-band occurrence — in `session.start` configuration or a
+  `session.configure` patch — is rejected with `invalid_config`.
 
 ### Fixed
 
@@ -54,8 +73,17 @@ All notable changes are tracked here. Format loosely follows
   `session.configure` or `grant_profile` cannot land a grant change between
   the check and the execution (the gate lock itself stays free for the
   emergency stop, hotkey polling and the idle watchdog while an action runs).
-  Confirmation approval callbacks now fire outside the gate lock to keep the
-  admission -> gate lock order deadlock-free.
+  The lock now scopes a single action only: a `batch.execute` admits itself
+  once and each item re-takes the lock, so a downgrade lands *between* batch
+  items and the next item is refused instead of the rest of the batch
+  escaping the check. Confirmation approval callbacks now fire outside the
+  gate lock to keep the admission -> gate lock order deadlock-free. The
+  action event envelope is uniform: an approved batch emits the outer
+  `action.started`/`action.finished` pair around its per-item pairs and
+  `batch.finished`, and an approval refused at execution time by a late
+  downgrade/revoke emits a full started+finished pair (`ok: false`,
+  `error_code: not_authorized`) instead of an orphaned failure.
+  `safety.grant_changed` is now declared in `manifest.json`.
 - Handled URLError, connection timeouts, and malformed JSON responses in `HttpClient` and `_BaseClient`, converting them into typed `ClientError` exceptions.
 - Added manifest validation regression test asserting complete parity between `manifest()` and `manifest.json`.
 - Aligned JSON-RPC 2.0 error codes to standard values (`-32603` for internal errors, `-32000` for server errors).

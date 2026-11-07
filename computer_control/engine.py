@@ -117,22 +117,33 @@ class Engine:
         """Called by the gate when a pending confirmation is approved."""
         if pending.tool == "batch.execute":
             payload = pending.payload
-            if payload:
-                self._run_batch_payload(payload)
-            return
-        result = self._execute(pending.tool, pending.arguments)
-        if not result.get("ok"):
-            # the approval was collected while the action was still legal;
-            # the re-check inside _execute refused it. Surface the refusal on
-            # the event stream so the human knows the approval did not run.
+            if not payload:
+                # The stash window was missed (the confirmation was created
+                # before the engine could attach the plan). Rebuild from the
+                # snapshotted arguments: _build_batch_plan re-validates and
+                # re-gates every item, so nothing runs ungated.
+                args = pending.arguments or {}
+                plan, _, _ = self._build_batch_plan(args.get("items") or [])
+                payload = {"items": plan,
+                           "continue_on_error": bool(args.get("continue_on_error")),
+                           "gap_ms": args.get("gap_ms")}
+            started = time.monotonic()
+            verdict = self._gate.admit_only(pending.tool, pending.arguments or {})
+            self._emit("action.started", {"tool": pending.tool, "arguments": pending.arguments})
+            if verdict.decision == "allow":
+                result = self._run_batch_payload(payload)
+            else:
+                result = self._verdict_failure(verdict, pending.tool)
             self._emit("action.finished", {
                 "tool": pending.tool,
-                "ok": False,
-                "duration_ms": 0,
+                "ok": bool(result.get("ok")),
+                "duration_ms": int((time.monotonic() - started) * 1000),
                 "error_code": (result.get("error") or {}).get("code"),
             })
+            return
+        self._execute(pending.tool, pending.arguments, announce_refusal=True)
 
-    def _execute(self, tool: str, args: dict) -> ResultDict:
+    def _execute(self, tool: str, args: dict, announce_refusal: bool = False) -> ResultDict:
         started = time.monotonic()
 
         def admitted():
@@ -148,14 +159,29 @@ class Engine:
             return result
 
         # Every execution - plain, batch-internal, or confirmation-approved -
-        # passes the gate again right here. The final check and the dispatch
-        # run under the gate's admission lock, so a session.configure /
-        # grant_profile cannot land a downgrade between the two: an approval
-        # (or a batch pre-scan) collected before the host narrowed the
-        # authorization profile is refused here instead of executing.
-        verdict, result = self._gate.execute_admitted(tool, args, admitted)
-        if verdict.decision != "allow":
-            return self._verdict_failure(verdict, tool)
+        # passes the gate again right here. For single actions the final check
+        # and the dispatch run under the gate's admission lock, so a
+        # session.configure / grant_profile cannot land a downgrade between
+        # the two: an approval (or a batch pre-scan) collected before the host
+        # narrowed the authorization profile is refused here instead of
+        # executing.
+        #
+        # batch.execute is the exception: its dispatch is a loop of sub-actions
+        # that each re-enter execute_admitted, so wrapping the whole loop would
+        # hold the admission lock until the batch ended and every remaining
+        # item would escape a downgrade. The batch itself gets only the final
+        # check (admit_only); the loop runs outside the lock and each item
+        # takes the lock on its own, so a downgrade lands between items and
+        # the next item's final check refuses it.
+        if tool == "batch.execute":
+            verdict = self._gate.admit_only(tool, args)
+            if verdict.decision != "allow":
+                return self._refused(tool, args, verdict, announce_refusal)
+            result = admitted()
+        else:
+            verdict, result = self._gate.execute_admitted(tool, args, admitted)
+            if verdict.decision != "allow":
+                return self._refused(tool, args, verdict, announce_refusal)
         duration_ms = int((time.monotonic() - started) * 1000)
         self._emit("action.finished", {
             "tool": tool,
@@ -164,6 +190,23 @@ class Engine:
             "error_code": (result.get("error") or {}).get("code"),
         })
         self._attach_meta(result, tool, duration_ms)
+        return result
+
+    def _refused(self, tool: str, args: dict, verdict, announce_refusal: bool) -> ResultDict:
+        result = self._verdict_failure(verdict, tool)
+        if announce_refusal:
+            # The approval path is asynchronous: no RPC response carries the
+            # refusal back to the harness, so the event stream must close the
+            # approval out. Emit the started/finished pair so subscribers see
+            # the same envelope as an action that ran (confirmation_resolved
+            # -> action.started -> action.finished ok:false).
+            self._emit("action.started", {"tool": tool, "arguments": args})
+            self._emit("action.finished", {
+                "tool": tool,
+                "ok": False,
+                "duration_ms": 0,
+                "error_code": (result.get("error") or {}).get("code"),
+            })
         return result
 
     # ------------------------------------------------------------- dispatch
