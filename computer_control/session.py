@@ -12,6 +12,17 @@ State machine (visible via system.status / events):
     ready --idle timeout--> standby
     stopped/standby --session.resume--> ready
     any --session.stop--> idle
+
+Authorization profiles (safety.auth_profile: read_only / limited / full /
+revoked) are a separate axis from the states above - they narrow which tools
+clear the gate. session.configure is reachable in-band, so it may only narrow
+(or hold) the profile; widening is host-only, via a direct Python call to
+Session.grant_profile (in-process embedding) or the out-of-band control-file
+channel (host_control) when the plugin runs as a stdio subprocess - neither
+is a routed RPC method. The monotonicity is
+sticky across restarts: the narrowest profile the in-band channel has reached
+bounds every later session.start on the same Session object, so stop+start
+cannot silently reload the wider profile from the host's config file.
 """
 
 from __future__ import annotations
@@ -22,7 +33,8 @@ import time
 from typing import Callable, List, Optional
 
 from computer_control import actions as act
-from computer_control.config import Config, apply_overrides, default_config, from_dict
+from computer_control.config import (AUTH_PROFILES, Config, apply_overrides, authorization_widens,
+                                     default_config, from_dict)
 from computer_control.drivers import create_driver
 from computer_control.drivers.base import BaseDriver
 from computer_control.engine import Engine
@@ -33,10 +45,19 @@ from computer_control.policy import SafetyGate
 _CONFIGURABLE_KEYS = ("capture", "safety", "a11y", "runtime")
 
 # Fields that are fixed at session.start and rejected by session.configure.
+# auth_profile is deliberately NOT here: the host has to be able to move it at
+# runtime. The anti-escalation guarantee is monotonicity instead, enforced on
+# the in-band path only (see Session._configure).
 _IMMUTABLE_FIELDS = {
     "capture": {"backend"},
     "safety": {"emergency_hotkey", "panic_file", "visual_indicator"},
 }
+
+# Host-only safety keys: they come from the host's own config file or the
+# out-of-band control channel (host_control), never from an in-band patch -
+# an agent opting itself into deeper a11y observation under a narrowed
+# profile would defeat the point of the profile.
+_HOST_ONLY_SAFETY_KEYS = frozenset({"a11y_snapshot_opt_in"})
 
 
 class SessionError(Exception):
@@ -73,6 +94,11 @@ class Session:
         self._action_count = 0
         self._frame_counter = 0
         self._stop_requested = threading.Event()
+        # Narrowest authorization profile the in-band channel has ever placed
+        # this Session object at. Survives stop/start so a restart cannot
+        # reload a wider profile from the host's config file; only a host
+        # grant_profile lifts it. None until the first start.
+        self._profile_floor: Optional[str] = None
 
     # ------------------------------------------------------------ lifecycle
 
@@ -94,6 +120,25 @@ class Session:
                 raise SessionError("already_started", "session is already running; call session.stop first")
             try:
                 base = from_dict(self._base_config) if self._base_config else default_config()
+            except ValueError as exc:
+                raise SessionError("invalid_config", "configuration rejected: %s" % exc)
+            # session.start is in-band too, so stop+start must not be a way back
+            # up the ladder: the host's own config file is the cap for a session
+            # the agent (re)starts, and a downgrade the agent made earlier is
+            # sticky - the floor survives restarts, so a start that omits
+            # auth_profile still comes up at the narrowed profile (or below)
+            # instead of silently reloading the wider config-file profile. A
+            # runtime grant does not survive a restart; granting again is the
+            # host's explicit way back up.
+            if self._profile_floor is not None and authorization_widens(self._profile_floor,
+                                                                        base.safety.auth_profile):
+                base.safety.auth_profile = self._profile_floor
+            start_safety = raw_config.get("safety") if isinstance(raw_config, dict) else None
+            self._reject_host_only_keys(start_safety, "session.start")
+            requested = start_safety.get("auth_profile") if isinstance(start_safety, dict) else None
+            if requested is not None:
+                self._reject_widening(base.safety.auth_profile, requested, "session.start")
+            try:
                 cfg = apply_overrides(base, raw_config if raw_config is not None else {})
             except ValueError as exc:
                 raise SessionError("invalid_config", "configuration rejected: %s" % exc)
@@ -136,10 +181,14 @@ class Session:
             gate.on_approved = queue_approval
             gate.on_panic_state = self._on_panic_state
             gate.start_watchdog()
+            profile = self._cfg.safety.auth_profile
+            self._profile_floor = profile
             self._emit("session.started", {"state": self.state, "surface": surface.as_dict(),
-                                           "capabilities": driver.capabilities})
+                                           "capabilities": driver.capabilities,
+                                           "auth_profile": profile})
             return {"ok": True, "result": {"state": self.state, "surface": surface.as_dict(),
-                                           "capabilities": driver.capabilities},
+                                           "capabilities": driver.capabilities,
+                                           "auth_profile": profile},
                     "error": None, "meta": {}}
 
     def _read_surface(self, cfg: Config, driver: BaseDriver) -> Surface:
@@ -196,11 +245,83 @@ class Session:
     # ------------------------------------------------------------- config
 
     def configure(self, patch: dict) -> dict:
+        """In-band configuration - the path the agent can reach over JSON-RPC.
+
+        A safety.auth_profile patch here is accepted only when it narrows (or
+        holds) the profile; widening needs Session.grant_profile.
+        """
+        return self._configure(patch, allow_widen=False, actor="agent")
+
+    def grant_profile(self, new_profile: str, actor: str = "host") -> dict:
+        """Out-of-band change of the authorization profile, made by the host;
+        any direction is allowed.
+
+        Deliberately not routable: nothing in the protocol handler table may
+        widen a profile, because being routable means the agent can reach it.
+        ``actor`` only labels the audit event - the permission to widen comes
+        from this being a direct Python call the host makes itself. For a
+        stdio-subprocess deployment the host cannot make this call; it uses
+        the control-file channel instead (host_control.HostControlChannel),
+        which funnels into apply_host_directive with the same semantics.
+        """
+        if new_profile not in AUTH_PROFILES:
+            raise SessionError("invalid_config",
+                               "auth_profile must be one of %s, got %r"
+                               % ("/".join(AUTH_PROFILES), new_profile))
+        return self._configure({"safety": {"auth_profile": new_profile}},
+                               allow_widen=True, actor=actor)
+
+    def apply_host_directive(self, directive: dict, actor: str = "host") -> dict:
+        """Apply one validated directive from the out-of-band host control
+        channel: ``auth_profile`` (any direction) and/or ``a11y_snapshot``
+        (the read-only-profiles opt-in).
+
+        Raises SessionError("not_started") when no session is running - the
+        channel treats that as "not now" and retries the directive until a
+        session is live.
+        """
+        safety = {}
+        if "auth_profile" in directive:
+            safety["auth_profile"] = directive["auth_profile"]
+        if "a11y_snapshot" in directive:
+            safety["a11y_snapshot_opt_in"] = bool(directive["a11y_snapshot"])
+        if not safety:
+            return {"ok": True, "result": {"state": self.state, "applied": {}},
+                    "error": None, "meta": {}}
+        return self._configure({"safety": safety}, allow_widen=True, actor=actor,
+                               host_only=True)
+
+    @staticmethod
+    def _reject_host_only_keys(safety_patch, channel: str) -> None:
+        if not isinstance(safety_patch, dict):
+            return
+        present = sorted(set(safety_patch) & _HOST_ONLY_SAFETY_KEYS)
+        if present:
+            raise SessionError("invalid_config",
+                               "%s may not set host-only option(s): %s; "
+                               "only the host's config file or the host control channel can"
+                               % (channel, ", ".join(present)))
+
+    def _reject_widening(self, current: str, requested: str, channel: str) -> None:
+        if requested not in AUTH_PROFILES:
+            raise SessionError("invalid_config",
+                               "auth_profile must be one of %s, got %r"
+                               % ("/".join(AUTH_PROFILES), requested))
+        if authorization_widens(current, requested):
+            raise SessionError("invalid_config",
+                               "%s may only narrow authorization; %s -> %s is a widening, "
+                               "the host must call Session.grant_profile"
+                               % (channel, current, requested))
+
+    def _configure(self, patch: dict, allow_widen: bool, actor: str,
+                   host_only: bool = False) -> dict:
         with self._lock:
             if self._gate is None:
                 raise SessionError("not_started", "no session is running")
             if not isinstance(patch, dict):
                 raise SessionError("invalid_config", "configuration patch must be an object")
+            if not host_only:
+                self._reject_host_only_keys((patch or {}).get("safety"), "session.configure")
             denied_sections = set(patch) - set(_CONFIGURABLE_KEYS)
             if denied_sections:
                 raise SessionError("invalid_config",
@@ -215,14 +336,29 @@ class Session:
             if immutable:
                 raise SessionError("invalid_config",
                                    "immutable after session.start: %s" % ", ".join(sorted(immutable)))
+            safety_patch = (patch or {}).get("safety")
+            requested = safety_patch.get("auth_profile") if isinstance(safety_patch, dict) else None
+            before = self._cfg.safety.auth_profile
+            if requested is not None and not allow_widen:
+                self._reject_widening(before, requested, "session.configure")
             try:
                 new_cfg = apply_overrides(self._cfg, patch)
             except ValueError as exc:
                 raise SessionError("invalid_config", "configuration rejected: %s" % exc)
             self._cfg = new_cfg
             self._gate.reconfigure(new_cfg.safety)
+            after = new_cfg.safety.auth_profile
+            if after != before:
+                # Every effective profile change re-anchors the sticky floor:
+                # in-band narrowing tightens it, a host grant lifts it to the
+                # level the host explicitly sanctioned.
+                self._profile_floor = after
             self._emit("session.configured", {"patch": patch})
-            return {"ok": True, "result": {"state": self.state, "applied": patch},
+            if after != before:
+                self._emit("safety.grant_changed", {"from": before, "to": after, "actor": actor,
+                                                   "widened": authorization_widens(before, after)})
+            return {"ok": True, "result": {"state": self.state, "auth_profile": after,
+                                           "applied": patch},
                     "error": None, "meta": {}}
 
     # --------------------------------------------------------------- calls

@@ -27,7 +27,8 @@
         },
         "effect": "deny"
       }
-    ]
+    ],
+    "auth_profile": "full"
   },
   "a11y": {
     "default_level": "standard",

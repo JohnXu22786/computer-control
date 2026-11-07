@@ -31,8 +31,21 @@ IDLE_ACTIONS = ("standby", "none")
 CAPTURE_BACKENDS = ("auto", "pillow", "mss")
 RULE_MATCHERS = ("equals", "glob", "contains")
 RULE_EFFECTS = ("allow", "deny")
+AUTH_PROFILES = ("read_only", "limited", "full", "revoked")
+
+# Capability ladder, narrowest first. Tells a narrowing patch from a widening
+# one: the in-band (agent-reachable) configure path may only walk down it.
+AUTH_PROFILE_RANK = {"revoked": 0, "read_only": 1, "limited": 2, "full": 3}
 
 CONFIG_SECTIONS = ("platform", "capture", "safety", "a11y", "runtime")
+
+
+def authorization_widens(current: str, requested: str) -> bool:
+    """True when ``requested`` grants more than ``current``. An unknown profile
+    counts as widening so a bad value can never slip through as a narrowing."""
+    if current not in AUTH_PROFILE_RANK or requested not in AUTH_PROFILE_RANK:
+        return True
+    return AUTH_PROFILE_RANK[requested] > AUTH_PROFILE_RANK[current]
 
 
 class ConfigError(ValueError):
@@ -127,6 +140,13 @@ class SafetyConfig:
     visual_indicator: bool = True
     default_rule: str = "allow"
     rules: List[RuleConfig] = field(default_factory=list)
+    auth_profile: str = "full"
+    # Host-only: the explicit opt-in that lets a11y.snapshot run under the
+    # read_only / revoked profiles. Settable through the host's config file
+    # or the out-of-band control channel; rejected in any in-band patch
+    # (session.start config / session.configure patch) - an agent opting
+    # itself into deeper observation would defeat the point.
+    a11y_snapshot_opt_in: bool = False
 
 
 @dataclass
@@ -174,6 +194,8 @@ class Config:
                 "visual_indicator": self.safety.visual_indicator,
                 "default_rule": self.safety.default_rule,
                 "rules": [r.as_dict() for r in self.safety.rules],
+                "auth_profile": self.safety.auth_profile,
+                "a11y_snapshot_opt_in": self.safety.a11y_snapshot_opt_in,
             },
             "a11y": {
                 "default_level": self.a11y.default_level,
@@ -272,7 +294,8 @@ def from_dict(data: dict) -> Config:
     if not isinstance(safety, dict):
         raise ConfigError("safety must be an object")
     unknown = set(safety) - {"emergency_hotkey", "confirm_threshold", "confirm_timeout_s", "idle_timeout_s",
-                             "idle_action", "panic_file", "visual_indicator", "default_rule", "rules"}
+                             "idle_action", "panic_file", "visual_indicator", "default_rule", "rules",
+                             "auth_profile", "a11y_snapshot_opt_in"}
     if unknown:
         raise ConfigError("unknown safety option(s): %s" % ", ".join(sorted(unknown)))
     if "emergency_hotkey" in safety:
@@ -301,6 +324,11 @@ def from_dict(data: dict) -> Config:
     if "rules" in safety:
         _expect_type(safety["rules"], list, "a list", "safety", "rules")
         cfg.safety.rules = [_parse_rule(raw, i) for i, raw in enumerate(safety["rules"])]
+    if "auth_profile" in safety:
+        cfg.safety.auth_profile = _expect_enum(safety["auth_profile"], AUTH_PROFILES, "safety", "auth_profile")
+    if "a11y_snapshot_opt_in" in safety:
+        _expect_type(safety["a11y_snapshot_opt_in"], bool, "a boolean", "safety", "a11y_snapshot_opt_in")
+        cfg.safety.a11y_snapshot_opt_in = safety["a11y_snapshot_opt_in"]
 
     # a11y
     a11y = data.get("a11y", {})

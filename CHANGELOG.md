@@ -8,9 +8,82 @@ All notable changes are tracked here. Format loosely follows
 ### Added
 
 - Added `--version` / `-V` CLI flag to inspect package version from the command line.
+- Added runtime authorization profiles (`safety.auth_profile`: `full` /
+  `limited` / `read_only` / `revoked`) as an axis orthogonal to the operational
+  state. The check runs ahead of the allow/deny rule scan, on the path shared
+  by plain and batch-internal actions, so batching cannot bypass a profile;
+  refused actions return a new `not_authorized` decision, reported with the
+  active profile in `error.data.auth_profile`. `revoked` is the bottom rung of
+  that ladder rather than a fifth state or another emergency stop: it keeps
+  `screen.capture` running, cancels a pending confirmation the moment it is
+  entered, and leaves `state` at `ready`. `limited` refuses every `keyboard.*`
+  action plus `a11y.input` (text injection into a focused node is
+  keyboard-equivalent); `read_only` and `revoked` admit `screen.capture`
+  unconditionally, and `a11y.snapshot` only after the host opts in.
+- Added the grant channel for changing a profile on a live session.
+  `session.configure` is the agent-reachable path and may only narrow
+  `safety.auth_profile` or hold it; any widening, including one step up out of
+  `revoked`, is rejected with `invalid_config`. `session.start` is capped the
+  same way — the profile in the host's own config file bounds a restarted
+  session, so stop-then-restart is not an escape hatch, and a runtime grant
+  does not survive a restart. The host moves profiles in any direction with
+  `Session.grant_profile(new_profile, actor="host")`, a direct Python call
+  deliberately absent from the JSON-RPC handler table. Where the host cannot
+  make that call (the plugin runs as a stdio subprocess, as under dsh), the
+  same out-of-band authority now exists cross-process: `serve
+  --control-file PATH` (or the `COMPUTER_CONTROL_CONTROL_FILE` environment
+  variable) polls a host-written JSON directive
+  `{"seq": N, "auth_profile": ..., "a11y_snapshot": bool}`; only a `seq`
+  above the last applied one takes effect, so re-granting the same profile
+  means bumping the seq, invalid content is rejected without consuming the
+  seq, a directive that arrives while no session is live stays pending until
+  one is, and deleting the file is not a revoke. The path appears in no config
+  schema, handler table, manifest entry or event, so the agent can neither
+  name nor redirect the channel, and the plugin exposes no file-writing tool.
+  Each change emits a `safety.grant_changed` event.
+- Added `safety.a11y_snapshot_opt_in` (default `false`), the host-only key
+  that admits `a11y.snapshot` under `read_only` / `revoked`. It is settable
+  only through the host's config file or the control-file channel (`a11y_snapshot`
+  directive); any in-band occurrence — in `session.start` configuration or a
+  `session.configure` patch — is rejected with `invalid_config`.
 
 ### Fixed
 
+- Hardened the authorization-profile channel against three review findings:
+  a downgrade is sticky across restarts of the same session object (a
+  `session.start` that omits `auth_profile` comes up at the narrowed profile
+  instead of silently reloading the wider one from the host's config file, and
+  an explicit start profile wider than the floor is rejected), a downgrade
+  cancels a pending confirmation whose tool the new profile no longer
+  authorizes, and every action is re-gated with `evaluate_allow_only` right
+  before execution so an approval collected before a downgrade/revoke cannot
+  run afterwards (the refusal surfaces as `action.finished` with
+  `error_code: not_authorized`). Plain `tools.call` `not_authorized` errors
+  now carry the active profile in `error.data.auth_profile`, matching the
+  batch path and the protocol docs, and `session.start` reports the effective
+  `auth_profile`.
+- Closed the last two authorization boundaries. A downgrade now inspects a
+  pending `batch.execute` confirmation down to its sub-actions: the stashed
+  payload plan (or the raw items when the engine has not stashed it yet) is
+  scanned, and if any sub-action is no longer authorized under the new
+  profile the whole batch confirmation is cancelled - a mixed batch cannot
+  smuggle `keyboard.*` items past a narrowing to `limited`. The final
+  authorization check and the action dispatch are now atomic under a new
+  admission lock shared with `set_grant`/`reconfigure`, so a
+  `session.configure` or `grant_profile` cannot land a grant change between
+  the check and the execution (the gate lock itself stays free for the
+  emergency stop, hotkey polling and the idle watchdog while an action runs).
+  The lock now scopes a single action only: a `batch.execute` admits itself
+  once and each item re-takes the lock, so a downgrade lands *between* batch
+  items and the next item is refused instead of the rest of the batch
+  escaping the check. Confirmation approval callbacks now fire outside the
+  gate lock to keep the admission -> gate lock order deadlock-free. The
+  action event envelope is uniform: an approved batch emits the outer
+  `action.started`/`action.finished` pair around its per-item pairs and
+  `batch.finished`, and an approval refused at execution time by a late
+  downgrade/revoke emits a full started+finished pair (`ok: false`,
+  `error_code: not_authorized`) instead of an orphaned failure.
+  `safety.grant_changed` is now declared in `manifest.json`.
 - Handled URLError, connection timeouts, and malformed JSON responses in `HttpClient` and `_BaseClient`, converting them into typed `ClientError` exceptions.
 - Added manifest validation regression test asserting complete parity between `manifest()` and `manifest.json`.
 - Aligned JSON-RPC 2.0 error codes to standard values (`-32603` for internal errors, `-32000` for server errors).

@@ -2,10 +2,20 @@
 
 It enforces, in order:
   1. operational state  - stopped (emergency stop) / standby (idle) block everything
-  2. allow/deny rules   - an explicit deny always wins over allows; allowlist
+  2. authorization profile - read_only / limited / full / revoked shrink which
+                          tools may run; orthogonal to the state above - a live
+                          session may narrow it in-band but never widen it
+  3. allow/deny rules   - an explicit deny always wins over allows; allowlist
                           mode when the default rule is deny
-  3. risk confirmation  - actions at or above the configured risk threshold
+  4. risk confirmation  - actions at or above the configured risk threshold
                           wait for a human approval before they may run
+
+A dedicated admission lock makes the final authorization check and the action
+dispatch atomic against grant changes: ``execute_admitted`` holds it across
+check + execution, and ``set_grant``/``reconfigure`` hold it across the grant
+mutation, so a downgrade can never land between the two. It deliberately is
+not the gate lock itself - the gate lock stays free for the emergency stop,
+the hotkey poll and the idle watchdog while a (possibly long) action runs.
 
 It also owns the emergency-stop machinery (hotkey polling, panic file,
 protocol-triggered panic) and the idle watchdog that puts the session into
@@ -32,6 +42,19 @@ _STATE_STANDBY = "standby"
 
 _RISK_ORDER = {"benign": 0, "moderate": 1, "high": 2}
 
+_GRANT_READ_ONLY = "read_only"
+_GRANT_LIMITED = "limited"
+_GRANT_REVOKED = "revoked"
+
+_NOT_AUTHORIZED = "not_authorized"
+
+# Observation-only surface for the read_only profile. 'system.status' is a
+# protocol method rather than a gated tool; it stays listed so the profile
+# reads as the intended capability set. a11y.snapshot is listed as a floor
+# capability but additionally requires the host's explicit opt-in (see
+# _check_grant_locked).
+_READ_ONLY_TOOLS = frozenset({"screen.capture", "system.status", "a11y.snapshot"})
+
 # Aliases that refer to the same physical key must not be able to dodge risk
 # classification or rule matching.
 _WIN_LIKE = frozenset({"win", "lwin", "rwin", "super", "meta"})
@@ -53,7 +76,7 @@ class PolicyError(Exception):
 class GateVerdict:
     """Result of evaluating one action against the gate."""
 
-    decision: str  # allow | deny | confirm | stopped | standby | busy
+    decision: str  # allow | deny | confirm | stopped | standby | busy | not_authorized
     reason: str = ""
     risk: str = RISK_LEVELS[0]
     data: dict = field(default_factory=dict)
@@ -154,7 +177,12 @@ class SafetyGate:
         self._emit = emit
         self._hotkey_probe = driver_hotkey_probe
         self._lock = threading.RLock()
+        # Serializes grant mutations against execute_admitted's check+dispatch
+        # pair. Lock order everywhere: admission -> gate lock.
+        self._admission_lock = threading.RLock()
         self._state = _STATE_READY
+        self._grant = cfg.auth_profile
+        self._last_rule = None
         self._panic_sources = set()
         self._pending: Optional[PendingConfirmation] = None
         self._expired_ids = {}  # request_id -> expiry timestamp, for error reporting
@@ -345,6 +373,13 @@ class SafetyGate:
     def risk_for(self, tool: str, arguments: dict) -> str:
         return risk_for(tool, arguments)
 
+    def _grant_deny_reason(self) -> str:
+        if self._grant == _GRANT_REVOKED:
+            return ("authorization profile 'revoked' is active; screen capture and status still "
+                    "run, but only the host can grant a wider profile or opt a11y.snapshot back in")
+        return ("action not permitted by authorization profile '%s'; requires the user to grant a wider profile"
+                % self._grant)
+
     def evaluate(self, tool: str, arguments: dict) -> GateVerdict:
         """Run an action through the gate. Never raises for policy outcomes."""
         with self._lock:
@@ -358,6 +393,9 @@ class SafetyGate:
 
             risk = self.risk_for(tool, arguments)
             rule_verdict = self._apply_rules_locked(tool, arguments)
+            if rule_verdict == _NOT_AUTHORIZED:
+                return GateVerdict(_NOT_AUTHORIZED, self._grant_deny_reason(), risk=risk,
+                                   data={"auth_profile": self._grant})
             if rule_verdict == "deny":
                 return GateVerdict("deny", "blocked by a deny rule", risk=risk, data={"rule": self._last_rule})
             if rule_verdict == "not_allowed":
@@ -373,7 +411,8 @@ class SafetyGate:
     def evaluate_allow_only(self, tool: str, arguments: dict) -> GateVerdict:
         """Gate an action for execution inside an already-approved context
         (batch payload). Confirmation is implicitly granted; deny rules,
-        operational state and the panic file still apply."""
+        authorization profiles, operational state and the panic file still
+        apply."""
         with self._lock:
             self._purge_expired_locked()
             if self._state == _STATE_STOPPED or self._panic_active_locked():
@@ -381,6 +420,9 @@ class SafetyGate:
             if self._state == _STATE_STANDBY:
                 return GateVerdict("standby", "session is in idle standby; call session.resume", risk=self.risk_for(tool, arguments))
             rule_verdict = self._apply_rules_locked(tool, arguments)
+            if rule_verdict == _NOT_AUTHORIZED:
+                return GateVerdict(_NOT_AUTHORIZED, self._grant_deny_reason(), risk=self.risk_for(tool, arguments),
+                                   data={"auth_profile": self._grant})
             if rule_verdict == "deny":
                 return GateVerdict("deny", "blocked by a deny rule", risk=self.risk_for(tool, arguments),
                                    data={"rule": self._last_rule})
@@ -389,14 +431,75 @@ class SafetyGate:
                                    risk=self.risk_for(tool, arguments))
             return GateVerdict("allow", risk=self.risk_for(tool, arguments))
 
+    def execute_admitted(self, tool: str, arguments: dict, runner):
+        """Final authorization check and dispatch, atomic against grant changes.
+
+        The check and ``runner`` run under the same admission lock that
+        ``set_grant``/``reconfigure`` acquire, so a ``session.configure`` or
+        ``grant_profile`` cannot land a grant change between the check and the
+        dispatch. Returns ``(verdict, result)``; ``result`` is None when the
+        verdict is not ``allow``.
+        """
+        with self._admission_lock:
+            verdict = self.evaluate_allow_only(tool, arguments)
+            if verdict.decision != "allow":
+                return verdict, None
+            return verdict, runner()
+
+    def admit_only(self, tool: str, arguments: dict) -> GateVerdict:
+        """Final authorization check under the admission lock, without holding
+        the lock across a dispatch.
+
+        Used for batch.execute: its dispatch is a loop of sub-actions that
+        each re-enter execute_admitted, so holding the admission lock across
+        the whole loop would starve set_grant/reconfigure until the batch
+        ended - every remaining item would escape a downgrade. With the check
+        scoped to the batch itself, the lock is free between items and the
+        per-item final check refuses anything the downgrade now blocks.
+        """
+        with self._admission_lock:
+            return self.evaluate_allow_only(tool, arguments)
+
+    def _check_grant_locked(self, tool: str) -> Optional[str]:
+        """Authorization profile check - the orthogonal axis to the operational
+        state. Returns _NOT_AUTHORIZED or None, and never touches _state.
+
+        'revoked' and 'read_only' share the observation floor: withdrawing
+        authority must not blind the human deciding whether to hand it back.
+        a11y.snapshot sits on that floor only with the host's explicit
+        opt-in (safety.a11y_snapshot_opt_in, host-only settable) - the tree
+        exposes whatever text happens to be on screen, so a narrowed/withdrawn
+        profile defaults to refusing it. 'limited' blocks keyboard input and
+        its a11y equivalent (a11y.input types into focused nodes, i.e. it
+        injects text); everything else on the floor still runs. revoked bites
+        harder on the way in (a pending confirmation is cancelled, see
+        set_grant) and is the only rung an agent cannot climb back out of
+        in-band.
+        """
+        if self._grant in (_GRANT_REVOKED, _GRANT_READ_ONLY):
+            if tool == "a11y.snapshot":
+                if not self._cfg.a11y_snapshot_opt_in:
+                    return _NOT_AUTHORIZED
+            elif tool not in _READ_ONLY_TOOLS:
+                return _NOT_AUTHORIZED
+        if self._grant == _GRANT_LIMITED and (tool.startswith("keyboard.") or tool == "a11y.input"):
+            return _NOT_AUTHORIZED
+        return None
+
     def _apply_rules_locked(self, tool: str, arguments: dict):
-        """Returns 'allow' | 'deny' | 'not_allowed'.
+        """Returns 'allow' | 'deny' | 'not_allowed' | 'not_authorized'.
+
+        Every action - plain and batch-internal alike - arrives through here,
+        so the authorization check is placed ahead of the rule scan.
 
         All rules are scanned: the first matching allow and the first matching
         deny are remembered, and an explicit deny always wins regardless of
         rule order. An 'allow' effect never exempts from the confirmation
         threshold (that is a separate safety layer).
         """
+        granted = self._check_grant_locked(tool)
+        if granted is not None:
+            return granted
         first_allow = None
         first_deny = None
         for rule in self._cfg.rules:
@@ -502,9 +605,14 @@ class SafetyGate:
                 "approve": approve,
                 "tool": pending.tool,
             })
-            if approve and self.on_approved is not None:
-                self.on_approved(pending)
-            return pending
+            callback = self.on_approved if approve else None
+        if callback is not None:
+            # Outside the gate lock: the callback leads to execution, which
+            # takes the admission lock. Calling it under the gate lock would
+            # nest gate -> admission and deadlock against set_grant's
+            # admission -> gate order.
+            callback(pending)
+        return pending
 
     def pending_confirmation(self) -> Optional[PendingConfirmation]:
         with self._lock:
@@ -512,10 +620,75 @@ class SafetyGate:
 
     # ------------------------------------------------------------- lifecycle
 
+    def set_grant(self, profile: str) -> None:
+        """Change the authorization profile on a live gate.
+
+        A downgrade cancels a pending confirmation the new profile no longer
+        authorizes: authority was withdrawn, so an approval collected earlier
+        must not run. For a pending ``batch.execute`` this looks through the
+        stashed payload - if any sub-action is no longer authorized, the whole
+        batch confirmation is cancelled. Entering 'revoked' cancels the pending
+        confirmation unconditionally - it bites harder on the way in. The
+        operational state is left alone - revoked is a capability rung, not a
+        state, so a revoked session still reports 'ready'.
+
+        The grant mutation holds the admission lock, so it cannot land between
+        an action's final check and its dispatch.
+        """
+        with self._admission_lock:
+            with self._lock:
+                self._set_grant_locked(profile)
+
+    def _set_grant_locked(self, profile: str) -> None:
+        if profile == self._grant:
+            return
+        self._grant = profile
+        if profile == _GRANT_REVOKED:
+            self._cancel_pending_locked("cancelled by authorization revoke")
+            return
+        pending = self._pending
+        if (pending is not None and pending.status == "pending"
+                and self._pending_blocked_by_grant_locked(pending)):
+            self._cancel_pending_locked("cancelled by authorization downgrade")
+
+    def _pending_blocked_by_grant_locked(self, pending: PendingConfirmation) -> bool:
+        if self._check_grant_locked(pending.tool) is not None:
+            return True
+        if pending.tool != "batch.execute":
+            return False
+        # batch.execute itself is never refused by 'limited', so a mixed batch
+        # could smuggle keyboard items past a downgrade unless the sub-actions
+        # are checked too.
+        for tool in _batch_subtool_names(pending):
+            if self._check_grant_locked(tool) is not None:
+                return True
+        return False
+
     def reconfigure(self, cfg: SafetyConfig) -> None:
-        with self._lock:
-            self._cfg = cfg
-            self._hotkey_names = _parse_hotkey_spec(cfg.emergency_hotkey)
+        with self._admission_lock:
+            with self._lock:
+                self._cfg = cfg
+                self._hotkey_names = _parse_hotkey_spec(cfg.emergency_hotkey)
+                self._set_grant_locked(cfg.auth_profile)
+
+
+def _batch_subtool_names(pending: PendingConfirmation) -> List[str]:
+    """Sub-action tool names of a pending batch confirmation: the stashed plan
+    when available (only 'run' entries execute), otherwise the raw items, so a
+    downgrade landing before the engine stashed the payload still sees the
+    sub-tools."""
+    payload = pending.payload
+    if payload:
+        names = []
+        for entry in payload.get("items") or []:
+            if isinstance(entry, (list, tuple)) and entry and entry[0] == "run":
+                names.append(entry[1])
+        return names
+    names = []
+    for item in (pending.arguments or {}).get("items") or []:
+        if isinstance(item, dict) and item.get("tool"):
+            names.append(item["tool"])
+    return names
 
 
 def _parse_hotkey_spec(spec: str) -> List[str]:

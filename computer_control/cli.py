@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from computer_control.config import load_config
@@ -24,6 +25,9 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--transport", choices=["stdio", "http"], default="stdio")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8765)
+    serve.add_argument("--control-file", default=None,
+                       help="host-only control directive file (or set COMPUTER_CONTROL_CONTROL_FILE); "
+                            "the host rewrites it to change the authorization profile at runtime")
 
     check = sub.add_parser("check", help="diagnose the environment: platform, backends, capture, UIA")
     check.add_argument("--config", default=argparse.SUPPRESS, help="path to a JSON configuration file (or set COMPUTER_CONTROL_CONFIG)")
@@ -55,11 +59,18 @@ def cmd_serve(args) -> int:
     # Sessions are created lazily by the router; its event sink is installed
     # by the transport, so events reach the wire automatically. The config
     # file becomes the base for every session.start.
-    router = Router(base_config=cfg.as_dict())
-    if args.transport == "http":
-        run_http(router, args.host, args.port)
-    else:
-        _wire_stdio(router)
+    control_file = getattr(args, "control_file", None) or os.environ.get(
+        "COMPUTER_CONTROL_CONTROL_FILE") or None
+    router = Router(base_config=cfg.as_dict(), control_file=control_file, log=log)
+    if control_file:
+        log("host control channel enabled: %s" % control_file)
+    try:
+        if args.transport == "http":
+            run_http(router, args.host, args.port)
+        else:
+            _wire_stdio(router)
+    finally:
+        router.close()
     return 0
 
 
