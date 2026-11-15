@@ -478,6 +478,26 @@ class TestGrantChannel(unittest.TestCase):
         finally:
             session.stop()
 
+    def test_host_a11y_opt_out_survives_session_restart(self):
+        session = self.make({"safety": {"auth_profile": "read_only",
+                                        "a11y_snapshot_opt_in": True}})
+        try:
+            session.start({})
+            self.assertTrue(session.call("a11y.snapshot", {})["ok"])
+            session.apply_host_directive({"a11y_snapshot": False})
+            self.assertEqual((session.call("a11y.snapshot", {}).get("error") or {}).get("code"),
+                             "not_authorized")
+
+            session.stop()
+            session.start({})
+            self.assertEqual((session.call("a11y.snapshot", {}).get("error") or {}).get("code"),
+                             "not_authorized")
+
+            session.apply_host_directive({"a11y_snapshot": True})
+            self.assertTrue(session.call("a11y.snapshot", {})["ok"])
+        finally:
+            session.stop()
+
 
     def test_restart_over_rpc_cannot_widen(self):
         # stop+start is in-band too: the host's config file caps what a restarted

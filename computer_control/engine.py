@@ -195,11 +195,9 @@ class Engine:
     def _refused(self, tool: str, args: dict, verdict, announce_refusal: bool) -> ResultDict:
         result = self._verdict_failure(verdict, tool)
         if announce_refusal:
-            # The approval path is asynchronous: no RPC response carries the
-            # refusal back to the harness, so the event stream must close the
-            # approval out. Emit the started/finished pair so subscribers see
-            # the same envelope as an action that ran (confirmation_resolved
-            # -> action.started -> action.finished ok:false).
+            # Some refusal paths (approved actions and batch items rejected
+            # after a downgrade) have no separate per-action event envelope.
+            # Emit the pair so subscribers see a complete refusal record.
             self._emit("action.started", {"tool": tool, "arguments": args})
             self._emit("action.finished", {
                 "tool": tool,
@@ -439,7 +437,7 @@ class Engine:
 
             verdict = self._gate.evaluate_allow_only(tool, args)
             if verdict.decision != "allow":
-                plan.append(("error", self._verdict_failure(verdict, tool)))
+                plan.append(("refused", tool, args, verdict))
                 continue
 
             plan.append(("run", tool, args))
@@ -505,13 +503,16 @@ class Engine:
                 time.sleep(gap_ms / 1000.0)
             if entry[0] == "error":
                 result = entry[1]
+            elif entry[0] == "refused":
+                _, tool, args, verdict = entry
+                result = self._refused(tool, args, verdict, announce_refusal=True)
             else:
                 _, tool, args = entry
                 verdict = self._gate.evaluate_allow_only(tool, args)
                 if verdict.decision == "allow":
-                    result = self._execute(tool, args)
+                    result = self._execute(tool, args, announce_refusal=True)
                 else:
-                    result = self._verdict_failure(verdict, tool)
+                    result = self._refused(tool, args, verdict, announce_refusal=True)
             results.append(result)
             if not result.get("ok") and not continue_on_error:
                 status = "aborted"

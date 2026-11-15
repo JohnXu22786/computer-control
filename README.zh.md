@@ -23,7 +23,7 @@
 安全护栏（详见「安全」一节）：
 
 - **急停**：全局热键（默认 `Ctrl+Alt+F12`，可配）、协议指令、panic 文件三重触发；屏幕角落显示 STOP 横幅
-- **授权模式**：`read_only` / `limited` / `full` / `revoked` 收窄可通过安全门的工具集——独立于操作状态的正交轴，在 `session.start` 固化，因此 agent 无法在带内自行扩权
+- **授权模式**：`read_only` / `limited` / `full` / `revoked` 收窄可通过安全门的工具集——它独立于操作状态；运行时可带内降权，只有宿主能通过带外控制路径授权变宽
 - **允许/拒绝规则**：按工具名与参数匹配，拒绝永远优先；可切换白名单模式
 - **确认流**：高风险动作（含 `win` 键或 `ctrl+alt` 的组合键等）等待人工批准，超时自动拒绝
 - **空闲待机**：无操作超过阈值自动进入待机，拒绝一切动作直到恢复
@@ -160,7 +160,9 @@ python examples/demo.py
 
 - **急停（三重）**：默认全局热键 `Ctrl+Alt+F12`（配置 `safety.emergency_hotkey`，可置空禁用）；协议方法 `control.panic`；panic 文件（`safety.panic_file`，存在即停）。急停后所有动作返回 `safety_stopped`；`session.resume` 或再次按热键恢复。急停生效时桌面角落显示红色 STOP 横幅（`safety.visual_indicator`）。
 - **授权模式**（`safety.auth_profile`，默认 `full`）：一条由宽到窄的能力阶梯。`full` 不做收窄；`limited` 在此基础上额外拒绝所有 `keyboard.*` 动作与 `a11y.input`（向焦点节点注入文本等价于键盘输入）；`read_only` 恒放行 `screen.capture`，`a11y.snapshot` 仅在宿主显式 opt-in（`safety.a11y_snapshot_opt_in`）后放行；`revoked` 与 `read_only` 共享同一观察底线，但进入的那一刻会取消待确认请求。被拒动作返回 `not_authorized`。**它是独立于上述操作状态的正交轴**，而非第五个状态：只缩小能通过安全门的工具集合，`ready` / `standby` / `stopped` 的含义不变，也**不触发急停**——`revoked` 会话的 `state` 仍是 `ready`。该检查位于允许/拒绝规则扫描**之前**，且普通动作与批量内层动作共用同一求值点，因此无法借批量绕过授权模式。
-  提权只走带外：`session.configure`（agent 经 RPC 可达）接受**收窄或维持**当前阶梯位置的 `auth_profile`，任何变宽都返回 `invalid_config`，哪怕只是 `revoked → read_only` 一步。`session.start` 同样属于带内，所以「先 stop 再 start」也不是逃生门：重启后的会话以宿主配置文件里声明的模式、以及**该会话对象上 agent 带内降到过的最窄档位**为上限——降权是粘性的，不传 `auth_profile` 的重启也会以收窄后的档位启动（只有宿主 grant 才能抬高上限），运行时提权也不跨重启保留。宿主改权限有两条 agent 不可达的路径：进程内直接调用 Python 方法 `Session.grant_profile(new_profile, actor="host")`；插件以 stdio 子进程运行时（dsh 场景）改写启动时指定的控制文件（`serve --control-file PATH` 或 `COMPUTER_CONTROL_CONTROL_FILE`）：写入 `{"seq": N, "auth_profile": "...", "a11y_snapshot": bool}`——只有比上一次更大的 `seq` 才生效，无会话在运行时指令挂起待用，删除文件也不等于收回授权。两者都不注册进 JSON-RPC 路由表，`a11y_snapshot_opt_in` 同样为宿主专用键（带内出现即返回 `invalid_config`）。每次生效都会发出 `safety.grant_changed` 事件。降级会取消不再满足新档位的待确认请求（对 `batch.execute` 会下探到子动作）；每个动作在执行前都会重新过门，批准后才被降权/收回的动作不会执行。已知代价：agent 可以把自身一路降到 `revoked`，之后必须由宿主解锁。
+  agent 可通过 `session.configure` 收窄或维持 `auth_profile`；任何带内变宽（包括 `revoked → read_only`）都会返回 `invalid_config`。宿主可直接调用 `Session.grant_profile(new_profile, actor="host")`，或在 stdio 子进程场景写入启动时指定的控制文件（`serve --control-file PATH` / `COMPUTER_CONTROL_CONTROL_FILE`）；这两条路径均不在 JSON-RPC 路由表中。`a11y_snapshot_opt_in` 也是宿主专用键。agent 的 `session.stop` / `session.start` 不能扩权：同一 `Session` 重启后的有效档位受宿主配置上限和最近有效档位共同约束；宿主授权高于配置上限时，重启会回到配置上限。宿主通过 `a11y_snapshot` 指令设置的 opt-in/opt-out 会在同一 `Session` 的重启间保留。
+
+  控制文件格式为 `{"seq": N, "auth_profile": "...", "a11y_snapshot": bool}`；每条指令都是完整期望状态快照，修改其中一项时也要重复写入另一项的当前值。`seq` 只在当前服务进程内递增；进程重启后计数清零，并重新应用仍存在的完整快照。删除文件不会改变正在运行的会话；若新进程启动时文件不存在，会话从宿主配置开始。Linux 下控制文件和父目录须由 root 拥有，不可被 group/other 写入，访问/默认 POSIX ACL 也不得向其他主体授予有效写权限；插件必须以非特权用户运行且只有读取权限。Windows 下文件和父目录须由 LocalSystem 或内置 Administrators 所有，写权限仅授予这些主体；插件必须以未提升权限运行。其他 POSIX 平台因无法验证扩展 ACL 会拒绝启用控制通道。程序会检查并拒绝不安全路径。不要给插件的交互式 OS 身份 sudo/管理员权限：否则 agent 可通过桌面输入打开 shell 并伪造宿主指令。档位变更发出 `safety.grant_changed`；纯 a11y 开关通过 `session.configured` 报告。降级会取消不再满足新档位的待确认请求（对 `batch.execute` 会下探到子动作）；每个动作在执行前都会重新过门，批准后才被降权/收回的动作不会执行。已知代价：agent 可以把自身一路降到 `revoked`，之后必须由宿主解锁。
 - **允许/拒绝规则**（`safety.rules`）：`{match: {tool: "keyboard.*", argument: {name, matcher, value}}, effect: "deny"}`；拒绝规则永远优先于允许。`safety.default_rule: "deny"` 可切换为白名单模式（未显式允许的动作一律拒绝）。规则可运行时通过 `session.configure` 调整。
 - **确认流**：`safety.confirm_threshold`（默认 `high`）决定哪些风险等级需要人工批准；`safety.confirm_timeout_s`（默认 30s）超时自动拒绝。批准后动作照常执行并发出 `action.finished`。
 - **空闲待机**：`safety.idle_timeout_s` 大于 0 时启用，无操作超时进入待机（`session.idle` 事件），`session.resume` 恢复；`idle_action: "none"` 则只发事件不停摆。

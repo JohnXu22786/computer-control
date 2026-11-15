@@ -155,7 +155,15 @@ class Router:
             session = self._session_cache
         if session is None or not session.started:
             return False  # stays pending; lands on the next live session
-        session.apply_host_directive(directive)
+        try:
+            session.apply_host_directive(directive)
+        except SessionError as exc:
+            if exc.code == "not_started":
+                # stop() can win after the started check above. Leave the
+                # directive pending so the channel retries it on the next
+                # live session instead of consuming its sequence number.
+                return False
+            raise
         return True
 
     # ------------------------------------------------------------ dispatch
@@ -208,7 +216,12 @@ class Router:
 
     def _session_start(self, params):
         config = params["config"] if "config" in params else params
-        return self._guard(lambda: self._get_session().start(config), params)
+        session = self._get_session()
+        channel = self._control_channel
+        if channel is None:
+            return self._guard(lambda: session.start(config), params)
+        return self._guard(lambda: channel.start_session(
+            lambda directive: session.start(config, host_directive=directive)), params)
 
     def _session_stop(self, params):
         return self._guard(self._get_session().stop, params)

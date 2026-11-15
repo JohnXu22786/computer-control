@@ -9,7 +9,9 @@ import os
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
+from computer_control import control_permissions
 from computer_control.host_control import HostControlChannel
 from computer_control.protocol import Router
 from computer_control.session import Session
@@ -24,6 +26,13 @@ def make_session(base_config=None, emit=None):
 
 class TestChannelParsingAndSeq(unittest.TestCase):
     def setUp(self):
+        self._identity_policy = mock.patch.object(
+            control_permissions, "_validate_host_control_identity")
+        self._identity_policy.start()
+        self.addCleanup(self._identity_policy.stop)
+        self._windows_acl = mock.patch.object(control_permissions, "_validate_windows_acl")
+        self._windows_acl.start()
+        self.addCleanup(self._windows_acl.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.path = os.path.join(self.tmp.name, "control.json")
@@ -43,39 +52,65 @@ class TestChannelParsingAndSeq(unittest.TestCase):
             json.dump(doc, fh)
 
     def test_seq_advances_and_directive_applies(self):
-        self.write({"seq": 1, "auth_profile": "limited"})
+        self.write({"seq": 1, "auth_profile": "limited", "a11y_snapshot": False})
         self.assertTrue(self.channel.poll_once())
-        self.assertEqual(self.applied, [{"auth_profile": "limited"}])
+        self.assertEqual(self.applied, [{"auth_profile": "limited", "a11y_snapshot": False}])
         self.assertEqual(self.channel.last_seq, 1)
 
     def test_same_seq_is_idempotent(self):
-        self.write({"seq": 1, "auth_profile": "limited"})
+        self.write({"seq": 1, "auth_profile": "limited", "a11y_snapshot": False})
         self.assertTrue(self.channel.poll_once())
-        self.write({"seq": 1, "auth_profile": "limited"})
+        self.write({"seq": 1, "auth_profile": "limited", "a11y_snapshot": False})
         self.assertFalse(self.channel.poll_once())
         self.assertEqual(len(self.applied), 1)
 
     def test_lower_seq_is_ignored(self):
-        self.write({"seq": 3, "auth_profile": "limited"})
+        self.write({"seq": 3, "auth_profile": "limited", "a11y_snapshot": False})
         self.assertTrue(self.channel.poll_once())
-        self.write({"seq": 2, "auth_profile": "revoked"})
+        self.write({"seq": 2, "auth_profile": "revoked", "a11y_snapshot": True})
         self.assertFalse(self.channel.poll_once())
-        self.assertEqual(self.applied, [{"auth_profile": "limited"}])
+        self.assertEqual(self.applied, [{"auth_profile": "limited", "a11y_snapshot": False}])
+
+    def test_persistent_directive_is_reapplied_after_process_restart(self):
+        self.write({"seq": 1, "auth_profile": "revoked", "a11y_snapshot": False})
+        self.assertTrue(self.channel.poll_once())
+        self.write({"seq": 2, "auth_profile": "read_only", "a11y_snapshot": False})
+
+        restarted_applied = []
+        restarted = HostControlChannel(self.path,
+                                       lambda directive: restarted_applied.append(directive) or True)
+        self.assertTrue(restarted.poll_once())
+        self.assertEqual(restarted.last_seq, 2)
+        self.assertEqual(restarted_applied,
+                         [{"auth_profile": "read_only", "a11y_snapshot": False}])
 
     def test_regrant_same_profile_via_seq_bump_applies(self):
         # limited -> (agent narrows further) -> the host re-grants limited:
         # same profile value, so the edge trigger has to be the seq.
-        self.write({"seq": 1, "auth_profile": "limited"})
+        self.write({"seq": 1, "auth_profile": "limited", "a11y_snapshot": False})
         self.assertTrue(self.channel.poll_once())
         self.applied.clear()
-        self.write({"seq": 2, "auth_profile": "limited"})
+        self.write({"seq": 2, "auth_profile": "limited", "a11y_snapshot": False})
         self.assertTrue(self.channel.poll_once())
-        self.assertEqual(self.applied, [{"auth_profile": "limited"}])
+        self.assertEqual(self.applied, [{"auth_profile": "limited", "a11y_snapshot": False}])
 
     def test_a11y_snapshot_directive_maps_through(self):
-        self.write({"seq": 1, "a11y_snapshot": True})
+        self.write({"seq": 1, "auth_profile": "read_only", "a11y_snapshot": True})
         self.assertTrue(self.channel.poll_once())
-        self.assertEqual(self.applied, [{"a11y_snapshot": True}])
+        self.assertEqual(self.applied, [{"auth_profile": "read_only", "a11y_snapshot": True}])
+
+    def test_incomplete_snapshot_is_rejected_without_consuming_sequence(self):
+        for doc in ({"seq": 1, "auth_profile": "read_only"},
+                    {"seq": 1, "a11y_snapshot": False}):
+            with self.subTest(doc=doc):
+                self.write(doc)
+                self.assertFalse(self.channel.poll_once())
+                self.assertEqual(self.channel.last_seq, 0)
+                self.assertEqual(self.applied, [])
+
+        self.write({"seq": 1, "auth_profile": "read_only", "a11y_snapshot": False})
+        self.assertTrue(self.channel.poll_once())
+        self.assertEqual(self.channel.last_seq, 1)
 
     def test_invalid_content_ignored_and_seq_not_consumed(self):
         for doc in ("not json", json.dumps([1, 2]), json.dumps("x"),
@@ -93,17 +128,36 @@ class TestChannelParsingAndSeq(unittest.TestCase):
         self.assertEqual(self.channel.last_seq, 0)
         self.assertTrue(self.notes)  # the rejections were surfaced once each
         # a corrected directive with the same seq still applies
-        self.write({"seq": 1, "auth_profile": "read_only"})
+        self.write({"seq": 1, "auth_profile": "read_only", "a11y_snapshot": False})
         self.assertTrue(self.channel.poll_once())
 
     def test_missing_file_is_a_no_op(self):
         self.assertFalse(self.channel.poll_once())
+        self.assertEqual(self.notes, [])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits are checked on POSIX")
+    def test_insecure_parent_permissions_rejected(self):
+        parent_mode = os.stat(self.tmp.name).st_mode & 0o777
+        os.chmod(self.tmp.name, parent_mode | 0o002)
+        try:
+            with self.assertRaises(PermissionError):
+                HostControlChannel(self.path, self._record)
+        finally:
+            os.chmod(self.tmp.name, parent_mode)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits are checked on POSIX")
+    def test_world_writable_directive_file_is_not_applied(self):
+        self.write({"seq": 1, "auth_profile": "full", "a11y_snapshot": False})
+        os.chmod(self.path, 0o666)
+
+        self.assertFalse(self.channel.poll_once())
+        self.assertEqual(self.channel.last_seq, 0)
         self.assertEqual(self.applied, [])
 
     def test_apply_false_keeps_directive_pending(self):
         outcomes = [False, True]
         self.channel._apply = lambda directive: outcomes.pop(0)
-        self.write({"seq": 1, "auth_profile": "full"})
+        self.write({"seq": 1, "auth_profile": "full", "a11y_snapshot": False})
         self.assertFalse(self.channel.poll_once())  # no live session yet
         self.assertEqual(self.channel.last_seq, 0)
         self.assertTrue(self.channel.poll_once())  # retried and applied
@@ -113,7 +167,7 @@ class TestChannelParsingAndSeq(unittest.TestCase):
         def boom(directive):
             raise RuntimeError("session blew up")
         self.channel._apply = boom
-        self.write({"seq": 1, "auth_profile": "full"})
+        self.write({"seq": 1, "auth_profile": "full", "a11y_snapshot": False})
         self.assertFalse(self.channel.poll_once())
         # consumed: a retried poll does not hammer the apply forever
         self.assertFalse(self.channel.poll_once())
@@ -136,17 +190,24 @@ class TestChannelParsingAndSeq(unittest.TestCase):
             return result
 
         self.channel._apply = apply_and_signal
-        self.write({"seq": 1, "auth_profile": "limited"})
+        self.write({"seq": 1, "auth_profile": "limited", "a11y_snapshot": False})
         self.assertTrue(applied.wait(5.0))
         self.channel.close()
         self.channel.close()  # idempotent
         self.assertIsNone(self.channel._thread)
-        self.assertEqual(self.applied, [{"auth_profile": "limited"}])
+        self.assertEqual(self.applied, [{"auth_profile": "limited", "a11y_snapshot": False}])
         self.assertEqual(self.channel.last_seq, 1)
 
 
 class TestRouterIntegration(unittest.TestCase):
     def setUp(self):
+        self._identity_policy = mock.patch.object(
+            control_permissions, "_validate_host_control_identity")
+        self._identity_policy.start()
+        self.addCleanup(self._identity_policy.stop)
+        self._windows_acl = mock.patch.object(control_permissions, "_validate_windows_acl")
+        self._windows_acl.start()
+        self.addCleanup(self._windows_acl.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.path = os.path.join(self.tmp.name, "control.json")
@@ -201,7 +262,7 @@ class TestRouterIntegration(unittest.TestCase):
                       "params": {"patch": {"safety": {"auth_profile": "read_only"}}}})
         self.assertEqual((session.call("pointer.click", {}).get("error") or {}).get("code"),
                          "not_authorized")
-        self.write({"seq": 1, "auth_profile": "limited"})
+        self.write({"seq": 1, "auth_profile": "limited", "a11y_snapshot": False})
         self.assertTrue(router._control_channel.poll_once())
 
         # the grant took effect and announced itself as a host widening
@@ -217,17 +278,70 @@ class TestRouterIntegration(unittest.TestCase):
                          .get("code"), "not_authorized")
         self.assertTrue(session.call("pointer.click", {})["ok"])
 
+    def test_process_restart_replays_complete_host_snapshot(self):
+        base = {"safety": {"auth_profile": "read_only",
+                            "a11y_snapshot_opt_in": True}}
+        first_router = self.make_router(base)
+        first_router.handle({"jsonrpc": "2.0", "id": 1,
+                             "method": "session.start", "params": {}})
+        self.write({"seq": 1, "auth_profile": "read_only", "a11y_snapshot": False})
+        self.assertTrue(first_router._control_channel.poll_once())
+        first_session = first_router._session_cache
+        self.assertEqual((first_session.call("a11y.snapshot", {}).get("error") or {}).get("code"),
+                         "not_authorized")
+
+        self.write({"seq": 2, "auth_profile": "read_only", "a11y_snapshot": False})
+        self.assertTrue(first_router._control_channel.poll_once())
+        first_session.stop()
+        first_router.close()
+
+        second_router = self.make_router(base)
+        second_router.handle({"jsonrpc": "2.0", "id": 2,
+                              "method": "session.start", "params": {}})
+        second_session = second_router._session_cache
+        self.assertEqual(second_session._cfg.safety.auth_profile, "read_only")
+        self.assertEqual((second_session.call("a11y.snapshot", {}).get("error") or {}).get("code"),
+                         "not_authorized")
+        self.assertEqual(second_router._control_channel.last_seq, 2)
+
     def test_directive_stays_pending_until_a_session_is_live(self):
         router = self.make_router({"safety": {"auth_profile": "read_only"}})
-        self.write({"seq": 1, "auth_profile": "full"})
+        self.write({"seq": 1, "auth_profile": "full", "a11y_snapshot": False})
         self.assertFalse(router._control_channel.poll_once())  # nothing running
         self.assertEqual(router._control_channel.last_seq, 0)
         router.handle({"jsonrpc": "2.0", "id": 1, "method": "session.start", "params": {}})
-        self.assertTrue(router._control_channel.poll_once())
+        self.assertEqual(router._control_channel.last_seq, 1)
         with router._session_lock:
             session = router._session_cache
         self.assertEqual(session._cfg.safety.auth_profile, "full")
         self.assertTrue(session.call("pointer.click", {})["ok"])
+
+    def test_stop_race_keeps_directive_pending_until_restart(self):
+        router = self.make_router({"safety": {"auth_profile": "read_only",
+                                                "a11y_snapshot_opt_in": True}})
+        router.handle({"jsonrpc": "2.0", "id": 1, "method": "session.start", "params": {}})
+        session = router._session_cache
+        self.assertTrue(session.call("a11y.snapshot", {})["ok"])
+        apply_directive = session.apply_host_directive
+        stop_once = {"pending": True}
+
+        def stop_then_apply(directive):
+            if stop_once["pending"]:
+                stop_once["pending"] = False
+                session.stop()
+            return apply_directive(directive)
+
+        session.apply_host_directive = stop_then_apply
+        self.write({"seq": 1, "auth_profile": "read_only", "a11y_snapshot": False})
+        self.assertFalse(router._control_channel.poll_once())
+        self.assertEqual(router._control_channel.last_seq, 0)
+
+        router.handle({"jsonrpc": "2.0", "id": 2,
+                       "method": "session.start", "params": {}})
+        self.assertEqual(router._control_channel.last_seq, 1)
+        self.assertEqual(session._cfg.safety.auth_profile, "read_only")
+        self.assertEqual((session.call("a11y.snapshot", {}).get("error") or {}).get("code"),
+                         "not_authorized")
 
     def test_directive_revokes_and_cancels_pending_batch_confirmation(self):
         router = self.make_router({"safety": {"auth_profile": "full",
@@ -241,7 +355,7 @@ class TestRouterIntegration(unittest.TestCase):
         self.assertEqual(r["result"]["status"], "awaiting_confirmation")
         # the host revokes over the control channel; the pending confirmation
         # must be cancelled (approve:false on the resolved event), not executed
-        self.write({"seq": 1, "auth_profile": "revoked"})
+        self.write({"seq": 1, "auth_profile": "revoked", "a11y_snapshot": False})
         self.assertTrue(router._control_channel.poll_once())
         self.assertIsNone(session._gate.pending_confirmation())
         resolved = [p for t, p in self.events if t == "safety.confirmation_resolved"]

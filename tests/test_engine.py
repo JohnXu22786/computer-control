@@ -511,7 +511,7 @@ class TestAdmissionAtomicity(unittest.TestCase):
         real_execute = engine._execute
         calls = {"n": 0}
 
-        def gated_execute(tool, args, *extra):
+        def gated_execute(tool, args, *extra, **kwargs):
             calls["n"] += 1
             if calls["n"] == 3:  # 1: batch.execute, 2: item 1, 3: item 2
                 # parked between items: the admission lock must be free here,
@@ -519,7 +519,7 @@ class TestAdmissionAtomicity(unittest.TestCase):
                 between_items.set()
                 self.assertTrue(downgrade_done.wait(2.0),
                                 "downgrade could not land between batch items")
-            return real_execute(tool, args, *extra)
+            return real_execute(tool, args, *extra, **kwargs)
 
         engine._execute = gated_execute
         results = {}
@@ -546,10 +546,58 @@ class TestAdmissionAtomicity(unittest.TestCase):
         self.assertEqual(items[1]["error"]["data"]["auth_profile"], "limited")
         # only item 1 reached the driver
         self.assertEqual(len([e for e in driver.log() if e["kind"] == "type"]), 1)
-        # event envelope: outer + item 1 pairs; the refused item emits nothing
+        # The outer batch and each item get exactly one event pair. The
+        # downgraded item is reported as a refusal without dispatching.
+        started_tools = [p["tool"] for t, p in emit.dump() if t == "action.started"]
+        self.assertEqual(started_tools,
+                         ["batch.execute", "keyboard.type", "keyboard.type"])
+        finished = [p for t, p in emit.dump() if t == "action.finished"]
+        self.assertEqual([p["tool"] for p in finished],
+                         ["keyboard.type", "keyboard.type", "batch.execute"])
+        self.assertEqual([p.get("error_code") for p in finished],
+                         [None, "not_authorized", None])
+        self.assertEqual(started_tools.count("batch.execute"), 1)
+        self.assertIn("batch.finished", emit.types())
+        self.assertEqual(emit.types().count("batch.finished"), 1)
+
+    def test_downgrade_before_batch_prescan_emits_item_refusal_pair(self):
+        engine, _, gate, emit, _ = make_engine()
+        pre_scan_entered = threading.Event()
+        continue_pre_scan = threading.Event()
+        real_build_plan = engine._build_batch_plan
+
+        def blocked_build_plan(items):
+            pre_scan_entered.set()
+            self.assertTrue(continue_pre_scan.wait(timeout=2.0),
+                            "batch pre-scan was not released")
+            return real_build_plan(items)
+
+        engine._build_batch_plan = blocked_build_plan
+        results = {}
+        batch_thread = threading.Thread(target=lambda: results.update(r=engine.run_tool(
+            "batch.execute", {"items": [
+                {"tool": "keyboard.type", "arguments": {"text": "a"}},
+            ]})))
+        batch_thread.start()
+        try:
+            self.assertTrue(pre_scan_entered.wait(timeout=2.0),
+                            "batch never reached its pre-scan")
+            self.assertTrue(gate._admission_lock.acquire(blocking=False),
+                            "outer batch admission must release the lock before pre-scan")
+            gate._admission_lock.release()
+            gate.set_grant("read_only")
+        finally:
+            continue_pre_scan.set()
+        batch_thread.join(timeout=5.0)
+        self.assertFalse(batch_thread.is_alive(), "batch thread still running")
+
+        result = results["r"]
+        self.assertEqual(result["result"]["items"][0]["error"]["code"], "not_authorized")
         started_tools = [p["tool"] for t, p in emit.dump() if t == "action.started"]
         self.assertEqual(started_tools, ["batch.execute", "keyboard.type"])
-        self.assertIn("batch.finished", emit.types())
+        finished = [p for t, p in emit.dump() if t == "action.finished"]
+        self.assertEqual([p["tool"] for p in finished], ["keyboard.type", "batch.execute"])
+        self.assertEqual([p.get("error_code") for p in finished], ["not_authorized", None])
 
     def test_downgrade_that_wins_the_lock_intercepts_the_action(self):
         # The other arm of the race: the downgrade lands first (here it wins

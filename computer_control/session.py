@@ -99,6 +99,9 @@ class Session:
         # reload a wider profile from the host's config file; only a host
         # grant_profile lifts it. None until the first start.
         self._profile_floor: Optional[str] = None
+        # A host's explicit accessibility opt-in/out also survives stop/start;
+        # otherwise rebuilding from base_config could silently undo a revoke.
+        self._host_a11y_snapshot_opt_in: Optional[bool] = None
 
     # ------------------------------------------------------------ lifecycle
 
@@ -114,10 +117,18 @@ class Session:
         with self._lock:
             return self._gate is not None
 
-    def start(self, raw_config: Optional[dict]) -> dict:
+    def start(self, raw_config: Optional[dict],
+              host_directive: Optional[dict] = None) -> dict:
         with self._lock:
             if self._gate is not None:
                 raise SessionError("already_started", "session is already running; call session.stop first")
+            host_profile = None
+            host_a11y_snapshot_opt_in = None
+            if host_directive is not None:
+                host_profile = host_directive.get("auth_profile")
+                host_a11y_snapshot_opt_in = host_directive.get("a11y_snapshot")
+                if host_profile not in AUTH_PROFILES or not isinstance(host_a11y_snapshot_opt_in, bool):
+                    raise SessionError("invalid_config", "invalid host control snapshot")
             try:
                 base = from_dict(self._base_config) if self._base_config else default_config()
             except ValueError as exc:
@@ -128,8 +139,8 @@ class Session:
             # sticky - the floor survives restarts, so a start that omits
             # auth_profile still comes up at the narrowed profile (or below)
             # instead of silently reloading the wider config-file profile. A
-            # runtime grant does not survive a restart; granting again is the
-            # host's explicit way back up.
+            # host grant above the base-config cap is not retained by restart;
+            # the base config remains authoritative for the next session.
             if self._profile_floor is not None and authorization_widens(self._profile_floor,
                                                                         base.safety.auth_profile):
                 base.safety.auth_profile = self._profile_floor
@@ -142,6 +153,15 @@ class Session:
                 cfg = apply_overrides(base, raw_config if raw_config is not None else {})
             except ValueError as exc:
                 raise SessionError("invalid_config", "configuration rejected: %s" % exc)
+            profile_before_host = cfg.safety.auth_profile
+            if host_directive is not None:
+                # A persistent host snapshot is authoritative and must be in
+                # place before the new gate becomes visible to callers.
+                cfg.safety.auth_profile = host_profile
+                cfg.safety.a11y_snapshot_opt_in = host_a11y_snapshot_opt_in
+            if self._host_a11y_snapshot_opt_in is not None:
+                if host_directive is None:
+                    cfg.safety.a11y_snapshot_opt_in = self._host_a11y_snapshot_opt_in
             self._cfg = cfg
             try:
                 driver = self._driver_factory(cfg)
@@ -155,6 +175,8 @@ class Session:
             self._surface = surface
             self._gate = gate
             self._engine = engine
+            if host_directive is not None:
+                self._host_a11y_snapshot_opt_in = host_a11y_snapshot_opt_in
             self._started_at = time.time()
             self._action_count = 0
             self._frame_counter = 0
@@ -186,6 +208,17 @@ class Session:
             self._emit("session.started", {"state": self.state, "surface": surface.as_dict(),
                                            "capabilities": driver.capabilities,
                                            "auth_profile": profile})
+            if host_directive is not None:
+                patch = {"safety": {"auth_profile": host_profile,
+                                    "a11y_snapshot_opt_in": host_a11y_snapshot_opt_in}}
+                self._emit("session.configured", {"patch": patch})
+                if profile_before_host != host_profile:
+                    self._emit("safety.grant_changed", {
+                        "from": profile_before_host,
+                        "to": host_profile,
+                        "actor": "host",
+                        "widened": authorization_widens(profile_before_host, host_profile),
+                    })
             return {"ok": True, "result": {"state": self.state, "surface": surface.as_dict(),
                                            "capabilities": driver.capabilities,
                                            "auth_profile": profile},
@@ -345,6 +378,8 @@ class Session:
                 new_cfg = apply_overrides(self._cfg, patch)
             except ValueError as exc:
                 raise SessionError("invalid_config", "configuration rejected: %s" % exc)
+            if host_only and isinstance(safety_patch, dict) and "a11y_snapshot_opt_in" in safety_patch:
+                self._host_a11y_snapshot_opt_in = safety_patch["a11y_snapshot_opt_in"]
             self._cfg = new_cfg
             self._gate.reconfigure(new_cfg.safety)
             after = new_cfg.safety.auth_profile

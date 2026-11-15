@@ -101,11 +101,12 @@
   ```json
   {"seq": 7, "auth_profile": "limited", "a11y_snapshot": true}
   ```
-  - `seq`（必填，正整数，严格递增）：只有比上一次已生效的 `seq` 更大才生效——重授同一档位也要抬 seq；旧内容重放是无害的空操作。
-  - `auth_profile` / `a11y_snapshot`（可选）：档位可任意方向变更；`a11y_snapshot` 即 `a11y_snapshot_opt_in` 的开关。
-  - 内容非法（缺 seq、未知键、非法档位等）直接忽略且**不消耗 seq**，宿主可原 seq 改写重试；无会话在运行时指令**挂起待用**，落到下一个启动的会话；**删除文件不等于收回授权**——收回须显式写一条降档指令。通道只读不写，路径不出现在任何配置 schema、路由表、manifest 或事件里，agent 无法指名也无法重定向。
-- `session.start` 同样属于带内，因此 **stop + start 也不是逃生门**：重启时会拿宿主自己的配置文件（`base_config`，即 `--config` / `COMPUTER_CONTROL_CONFIG`）里声明的 `auth_profile` 作为上限，请求比它更宽返回 `invalid_config`。宿主未声明限制时上限即默认值 `full`，此时不受约束。运行时提权**不跨重启保留**，重启后回落到配置文件的上限。
+  - `seq`（必填，正整数，当前服务进程内严格递增）：只有比上一次已生效的 `seq` 更大才生效——重授同一档位也要抬 seq；同一进程内旧内容重放是无害的空操作。服务进程重启会清零内存计数，并重新应用仍存在的完整快照。
+  - `auth_profile` / `a11y_snapshot`（均必填）：每条指令都是完整宿主期望状态；只修改一项时，也要重复写入另一项的当前值。档位可任意方向变更；`a11y_snapshot` 即 `a11y_snapshot_opt_in` 的开关。
+  - 内容非法（缺字段、未知键、非法档位等）直接忽略且**不消耗 seq**，宿主可原 seq 改写重试；无会话在运行时指令**挂起待用**，落到下一个启动的会话。删除文件不会改变当前会话；若新进程启动时文件不存在，会话从宿主配置开始。通道只读不写，路径不出现在任何配置 schema、路由表、manifest 或事件里，agent 无法指名也无法重定向。
+- `session.start` 同样属于带内，因此 **stop + start 也不是逃生门**：重启时会拿宿主自己的配置文件（`base_config`，即 `--config` / `COMPUTER_CONTROL_CONFIG`）里声明的 `auth_profile` 作为上限，请求比它更宽返回 `invalid_config`。宿主未声明限制时上限即默认值 `full`。重启后的有效档位受配置上限和该 `Session` 最近有效档位共同约束；宿主授权若高于配置上限，重启后回到配置上限。
 - 带内降权是**粘性的**：同一 `Session` 实例上，agent 降到过的档位会成为之后所有 `session.start` 的额外上限——重启时即使**不传** `auth_profile`，会话也以该档位（或更低）启动，而不是静默重新加载配置文件里更宽的档位；显式请求比粘性档位更宽同样返回 `invalid_config`。宿主调用 `grant_profile` 后，粘性上限更新为宿主授予的档位。`session.start` 的结果与 `session.started` 事件携带生效的 `auth_profile`，供宿主核对。
 - 每次生效的模式变更都会发出 `safety.grant_changed` 事件（`from` / `to` / `actor` / `widened`）。
+- Linux 下控制文件及其父目录须由 root 拥有、不可被 group/other 写入，且访问/默认 POSIX ACL 不得向其他主体授予有效写权限；插件必须以非特权用户运行且只有读取权限。Windows 下文件和父目录须由 LocalSystem 或内置 Administrators 所有，写权限只授予这些主体；插件必须以未提升权限运行。其他 POSIX 平台因无法验证扩展 ACL 会拒绝启用控制通道。程序会检查权限并拒绝不安全路径。不要给插件的交互式 OS 身份 sudo/管理员权限，否则 agent 可通过桌面输入打开 shell 并伪造宿主指令。
 - 降级（含进入 `revoked`）会取消当前待确认请求中**不再被新档位放行**的项（发 `safety.confirmation_resolved`，`approve=false`），先前收集的批准不会再执行；进入 `revoked` 无条件取消待确认请求。对挂起的 `batch.execute` 会下探到其 payload 里的子动作：混合批中任一子动作被新档位拒绝（例如降级到 `limited` 后批内仍有 `keyboard.*`），整个批量确认即被取消——单查 `batch.execute` 本身是查不出来的。此外每个动作在真正执行前都会重新过门（`evaluate_allow_only`），且**最终检查与派发在同一把 admission 锁内完成**，`session.configure` / `grant_profile` 不可能插在两者之间：要么动作在降权前执行完，要么被降权拦截，不会出现「先降权、后执行」。被拒的已批准动作发 `action.finished`，`error_code=not_authorized`。`revoked` 不触发急停、不改 `state`，`screen.capture` 仍可运行（`a11y.snapshot` 需宿主 opt-in）。admission 锁只覆盖**单个动作**的最终检查与派发：批量每个 item 各自过锁，因此降级可以落在批量 item **之间**，让后续 item 被拒而不是整批逃脱检查。
 - 已知代价：agent 可以自我降权直至 `revoked`，把自身会话锁在只观察档位，需要宿主才能解锁。这是降权，不构成提权。

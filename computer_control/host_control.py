@@ -21,21 +21,40 @@ variable) and the channel polls it. The agent cannot reach it:
 Directive file format (one JSON object per file, host replaces the file
 atomically - write a temp file in the same directory, then os.replace):
 
+The parent directory and file must be owned by a separate host administrator:
+root on Linux, or LocalSystem / built-in Administrators on Windows. The plugin
+must run unprivileged and have read-only access; its interactive OS identity
+must not have sudo or administrator rights. This separation matters because an
+agent with desktop input could otherwise open a shell as the plugin user and
+rewrite a file owned by that same user. Linux also checks mode bits and access /
+default POSIX ACLs; Windows checks DACLs and opens the file without following a
+reparse point, then validates and reads the same handle. Other POSIX platforms
+fail closed until their ACLs can be verified.
+
     {"seq": 1, "auth_profile": "full", "a11y_snapshot": true}
 
 - ``seq`` (required): a positive integer, strictly increasing per
   directive. Only ``seq`` values above the last applied one take effect,
   which makes re-granting the same profile possible (bump the seq and
-  rewrite the file) and makes replays of an old file content no-ops.
-- ``auth_profile`` (optional): revoked / read_only / limited / full; any
+  rewrite the file) and makes replays of an old file content no-ops within
+  the process lifetime. The sequence counter is in memory: after a process
+  restart the persistent file is applied again as the host's current desired
+  state. Keep the complete snapshot in place if both settings should be
+  restored. If the file is removed, a running session keeps its current
+  settings, while a new process starts from its host config.
+- ``auth_profile`` (required): revoked / read_only / limited / full; any
   direction is allowed - the file itself is the host's authority.
-- ``a11y_snapshot`` (optional): the host's explicit opt-in for
+- ``a11y_snapshot`` (required): the host's explicit opt-in/out for
   ``a11y.snapshot`` under the read_only / revoked profiles.
 
+Every directive is a complete desired-state snapshot. When changing one
+setting, repeat the current value of the other; omitted settings are rejected
+so a later profile update cannot drop a persisted accessibility opt-out.
+
 A directive that arrives while no session is running stays pending: it is
-retried every tick and lands on the next live session. Deleting the file
-is NOT a revoke - the last applied grant persists (the sticky floor keeps
-holding it); revocation is an explicit directive.
+retried every tick and lands on the next live session. Deleting the file does
+not change a running session. If a new process starts without the file, its
+session starts from the host config instead of replaying the previous snapshot.
 
 The channel reads the file but never writes it.
 """
@@ -43,10 +62,12 @@ The channel reads the file but never writes it.
 from __future__ import annotations
 
 import json
+import os
 import threading
 from typing import Callable, Optional
 
 from computer_control.config import AUTH_PROFILES
+from computer_control.control_permissions import read_control_file, validate_control_directory
 
 _DIRECTIVE_KEYS = frozenset({"seq", "auth_profile", "a11y_snapshot"})
 
@@ -62,7 +83,10 @@ class HostControlChannel:
 
     def __init__(self, path: str, apply: Callable[[dict], bool],
                  log: Optional[Callable[[str], None]] = None):
-        self._path = str(path)
+        absolute_path = os.path.abspath(str(path))
+        parent = os.path.realpath(os.path.dirname(absolute_path) or os.curdir)
+        self._path = os.path.join(parent, os.path.basename(absolute_path))
+        validate_control_directory(parent)
         self._apply = apply
         self._log = log or (lambda message: None)
         self._last_seq = 0
@@ -99,51 +123,25 @@ class HostControlChannel:
         while not self._stop.wait(0.1):
             self.poll_once()
 
+    def start_session(self, start: Callable[[Optional[dict]], object]):
+        """Start with any pending snapshot applied before the session is live."""
+        with self._lock:
+            pending = self._read_pending_locked()
+            if pending is None:
+                return start(None)
+            seq, directive = pending
+            result = start(directive)
+            self._last_seq = seq
+            self._last_note = ""
+            return result
+
     def poll_once(self) -> bool:
         """One poll. Returns True when a directive was applied."""
         with self._lock:
-            try:
-                with open(self._path, "r", encoding="utf-8") as fh:
-                    raw = fh.read()
-            except OSError:
-                return False  # no directive file (or transient replace window)
-            try:
-                doc = json.loads(raw)
-            except ValueError:
-                self._note("control file: content is not valid JSON - directive ignored")
+            pending = self._read_pending_locked()
+            if pending is None:
                 return False
-            if not isinstance(doc, dict):
-                self._note("control file: directive must be a JSON object - ignored")
-                return False
-            unknown = set(doc) - _DIRECTIVE_KEYS
-            if unknown:
-                self._note("control file: unknown key(s) %s - directive ignored"
-                           % ", ".join(sorted(unknown)))
-                return False
-            seq = doc.get("seq")
-            if isinstance(seq, bool) or not isinstance(seq, int) or seq <= 0:
-                self._note("control file: 'seq' must be a positive integer - directive ignored")
-                return False
-            if seq <= self._last_seq:
-                return False  # already applied; idempotent re-read of an old directive
-
-            directive = {}
-            profile = doc.get("auth_profile")
-            if profile is not None:
-                if profile not in AUTH_PROFILES:
-                    self._note("control file: auth_profile %r is not one of %s - directive ignored"
-                               % (profile, "/".join(AUTH_PROFILES)))
-                    return False
-                directive["auth_profile"] = profile
-            opt_in = doc.get("a11y_snapshot")
-            if opt_in is not None:
-                if not isinstance(opt_in, bool):
-                    self._note("control file: 'a11y_snapshot' must be a boolean - directive ignored")
-                    return False
-                directive["a11y_snapshot"] = opt_in
-            if not directive:
-                self._note("control file: directive carries no change - ignored")
-                return False
+            seq, directive = pending
 
             try:
                 applied = self._apply(directive)
@@ -158,6 +156,50 @@ class HostControlChannel:
                 self._last_seq = seq
                 self._last_note = ""
             return bool(applied)
+
+    def _read_pending_locked(self):
+        try:
+            raw = read_control_file(self._path)
+        except PermissionError as exc:
+            self._note("control file: unsafe permissions - directive ignored (%s)" % exc)
+            return None
+        except OSError:
+            return None  # no directive file (or transient replace window)
+        try:
+            doc = json.loads(raw)
+        except ValueError:
+            self._note("control file: content is not valid JSON - directive ignored")
+            return None
+        if not isinstance(doc, dict):
+            self._note("control file: directive must be a JSON object - ignored")
+            return None
+        unknown = set(doc) - _DIRECTIVE_KEYS
+        if unknown:
+            self._note("control file: unknown key(s) %s - directive ignored"
+                       % ", ".join(sorted(unknown)))
+            return None
+        missing = _DIRECTIVE_KEYS - set(doc)
+        if missing:
+            self._note("control file: missing required key(s) %s - directive ignored"
+                       % ", ".join(sorted(missing)))
+            return None
+        seq = doc.get("seq")
+        if isinstance(seq, bool) or not isinstance(seq, int) or seq <= 0:
+            self._note("control file: 'seq' must be a positive integer - directive ignored")
+            return None
+        if seq <= self._last_seq:
+            return None  # already applied; idempotent re-read of an old directive
+
+        profile = doc["auth_profile"]
+        if profile not in AUTH_PROFILES:
+            self._note("control file: auth_profile %r is not one of %s - directive ignored"
+                       % (profile, "/".join(AUTH_PROFILES)))
+            return None
+        opt_in = doc["a11y_snapshot"]
+        if not isinstance(opt_in, bool):
+            self._note("control file: 'a11y_snapshot' must be a boolean - directive ignored")
+            return None
+        return seq, {"auth_profile": profile, "a11y_snapshot": opt_in}
 
     def _note(self, message: str) -> None:
         if message == self._last_note:

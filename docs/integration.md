@@ -113,17 +113,16 @@ stopped / standby --session.resume（或热键）--> ready
 
 dsh 场景下插件是 **stdio 子进程**，宿主调不到 Python 方法 `Session.grant_profile`；而凡可经 JSON-RPC 路由的方法 agent 都触达得到，路由表里不能有任何扩权入口。宿主因此用**控制文件通道**改档位 / 开关 `a11y_snapshot`：
 
-- **启用**：启动时 `serve --control-file PATH`（或环境变量 `COMPUTER_CONTROL_CONTROL_FILE`）。dsh 场景最简单的接法是在 harness 环境里设该环境变量——`index.js` 派生子进程时未覆盖 env，父环境会原样继承；也可在 bundle 的 `entry.command` 里追加 `--control-file PATH`。通道只读该文件、每 0.1s 轮询一次，`session` 重启不丢已生效的 `seq`。
+- **启用**：启动时 `serve --control-file PATH`（或环境变量 `COMPUTER_CONTROL_CONTROL_FILE`）。dsh 场景最简单的接法是在 harness 环境里设该环境变量——`index.js` 派生子进程时未覆盖 env，父环境会原样继承；也可在 bundle 的 `entry.command` 里追加 `--control-file PATH`。通道只读该文件、每 0.1s 轮询一次；同一服务进程内的 `session` 重启不丢已生效的 `seq`。服务进程重启会清零内存计数，并重新应用仍存在的控制文件作为宿主当前期望状态。
 - **指令格式**（宿主**原子替换**整个文件：同目录写临时文件后 `os.replace`）：
   ```json
   {"seq": 7, "auth_profile": "limited", "a11y_snapshot": true}
   ```
-  - `seq`（必填，正整数，严格递增）：只有比上一次已生效值更大的 `seq` 才生效——**重授同一档位也要抬 seq**；旧文件内容重放是无害空操作。
-  - `auth_profile`（可选）：任意方向，宿主写文件本身就是授权。
-  - `a11y_snapshot`（可选）：即 `read_only` / `revoked` 下放行 `a11y.snapshot` 的宿主 opt-in（`safety.a11y_snapshot_opt_in`）。
-  - 内容非法（缺 `seq`、未知键、非法档位）直接忽略且**不消耗 seq**；无会话在运行时指令**挂起待用**，落到下一个启动的会话；**删除文件不等于收回授权**——收回必须显式写一条降档指令。
+  - `seq`（必填，正整数，当前服务进程内严格递增）：只有比上一次已生效值更大的 `seq` 才生效——**重授同一档位也要抬 seq**；同一进程内旧文件内容重放是无害空操作，服务进程重启后现存文件会再次应用。
+  - `auth_profile` / `a11y_snapshot`（均必填）：每个文件都是完整宿主期望状态快照；更新其中一项时重复写入另一项的当前值。`auth_profile` 可任意方向变更；`a11y_snapshot` 控制 `read_only` / `revoked` 下是否放行 `a11y.snapshot`（`safety.a11y_snapshot_opt_in`）。
+  - 内容非法（缺字段、未知键、非法档位）直接忽略且**不消耗 seq**；无会话在运行时指令**挂起待用**，落到下一个启动的会话。删除文件不会改变当前会话；若新进程启动时文件不存在，会话从宿主配置开始。
 - **生效确认**：档位变更发 `safety.grant_changed`（`from` / `to` / `actor:"host"` / `widened`）；纯 `a11y_snapshot` 开关发 `session.configured`（`patch.safety.a11y_snapshot_opt_in`）。收不到事件即未生效，宿主应抬 seq 重写。
-- **安全边界**：路径不出现在任何配置 schema、路由表、manifest 或事件里，agent 无法指名也无法重定向；插件自身没有可写任意文件的工具，agent 无法伪造指令。通道的授权资格 =「谁能写这个文件」，请把它放进**仅宿主用户可写**的目录（如用户配置目录），不要放世界可写的临时目录。
+- **安全边界**：路径不出现在任何配置 schema、路由表、manifest 或事件里，agent 无法指名也无法重定向；插件自身没有可写任意文件的工具。授权边界由 OS ACL 提供，不能依赖路径保密：Linux 下文件和父目录须由 root 拥有、不可被 group/other 写入，且访问/默认 POSIX ACL 不得向其他主体授予有效写权限；插件以非特权用户只读访问。Windows 下文件和父目录须由 LocalSystem 或内置 Administrators 所有，写权限仅授予这些主体；插件必须以未提升权限运行。程序会检查并拒绝不安全路径。不要给插件的交互式 OS 身份 sudo/管理员权限，否则 agent 可通过桌面输入打开 shell 并伪造宿主指令。其他 POSIX 平台因无法验证扩展 ACL 会拒绝启用控制通道。
 - 事件流同时是**审计通道**：`safety.grant_changed` 里 `widened: true` 即宿主带外提权，建议 harness 记审计日志并向用户显著提示。
 
 ## 8. 其他建议
