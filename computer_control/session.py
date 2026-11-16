@@ -133,6 +133,7 @@ class Session:
                 base = from_dict(self._base_config) if self._base_config else default_config()
             except ValueError as exc:
                 raise SessionError("invalid_config", "configuration rejected: %s" % exc)
+            configured_profile_ceiling = base.safety.auth_profile
             # session.start is in-band too, so stop+start must not be a way back
             # up the ladder: the host's own config file is the cap for a session
             # the agent (re)starts, and a downgrade the agent made earlier is
@@ -156,7 +157,11 @@ class Session:
             profile_before_host = cfg.safety.auth_profile
             if host_directive is not None:
                 # A persistent host snapshot is authoritative and must be in
-                # place before the new gate becomes visible to callers.
+                # place before the new gate becomes visible to callers. It is
+                # capped by the original host config, not the agent's start
+                # profile or a sticky floor.
+                if authorization_widens(configured_profile_ceiling, host_profile):
+                    host_profile = configured_profile_ceiling
                 cfg.safety.auth_profile = host_profile
                 cfg.safety.a11y_snapshot_opt_in = host_a11y_snapshot_opt_in
             if self._host_a11y_snapshot_opt_in is not None:
@@ -378,16 +383,15 @@ class Session:
                 new_cfg = apply_overrides(self._cfg, patch)
             except ValueError as exc:
                 raise SessionError("invalid_config", "configuration rejected: %s" % exc)
+            after = new_cfg.safety.auth_profile
+            if after != before:
+                # Commit the restart floor before reconfigure can publish a
+                # cancellation callback that re-enters stop/start.
+                self._profile_floor = after
             if host_only and isinstance(safety_patch, dict) and "a11y_snapshot_opt_in" in safety_patch:
                 self._host_a11y_snapshot_opt_in = safety_patch["a11y_snapshot_opt_in"]
             self._cfg = new_cfg
             self._gate.reconfigure(new_cfg.safety)
-            after = new_cfg.safety.auth_profile
-            if after != before:
-                # Every effective profile change re-anchors the sticky floor:
-                # in-band narrowing tightens it, a host grant lifts it to the
-                # level the host explicitly sanctioned.
-                self._profile_floor = after
             self._emit("session.configured", {"patch": patch})
             if after != before:
                 self._emit("safety.grant_changed", {"from": before, "to": after, "actor": actor,

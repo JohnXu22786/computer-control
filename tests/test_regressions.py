@@ -341,6 +341,19 @@ class TestGrantChannel(unittest.TestCase):
                        driver_factory=lambda cfg: NullDriver(enable_a11y=True),
                        base_config=base_config)
 
+    def test_pending_host_snapshot_overrides_start_narrowing_and_sets_floor(self):
+        session = self.make({"safety": {"auth_profile": "full"}})
+        try:
+            result = session.start(
+                {"safety": {"auth_profile": "read_only"}},
+                host_directive={"auth_profile": "full", "a11y_snapshot": False},
+            )
+            self.assertEqual(result["result"]["auth_profile"], "full")
+            self.assertEqual(session._profile_floor, "full")
+            self.assertTrue(session.call("pointer.click", {})["ok"])
+        finally:
+            session.stop()
+
     def test_agent_may_narrow_but_not_widen(self):
         from computer_control.session import SessionError
 
@@ -359,6 +372,36 @@ class TestGrantChannel(unittest.TestCase):
             self.assertEqual(session.state, "ready")
         finally:
             session.stop()
+
+    def test_downgrade_callback_restart_keeps_profile_floor(self):
+        reentered_profiles = []
+        session = None
+
+        def emit(event, payload=None):
+            if (event == "safety.confirmation_resolved"
+                    and payload.get("reason") == "cancelled by authorization downgrade"):
+                session.stop()
+                session.start({})
+                reentered_profiles.append(session._cfg.safety.auth_profile)
+
+        session = Session(emit=emit,
+                          driver_factory=lambda cfg: NullDriver(enable_a11y=True),
+                          base_config={"safety": {"auth_profile": "full"}})
+        try:
+            session.start({"safety": {"confirm_threshold": "high"}})
+            requested = session.call("keyboard.combo", {"keys": ["win", "r"]})
+            self.assertTrue(requested["ok"], requested)
+            self.assertEqual(requested["result"]["status"], "awaiting_confirmation")
+
+            session.configure({"safety": {"auth_profile": "limited"}})
+
+            self.assertEqual(reentered_profiles, ["limited"])
+            restarted_action = session.call("keyboard.combo", {"keys": ["win", "r"]})
+            self.assertEqual((restarted_action.get("error") or {}).get("code"),
+                             "not_authorized")
+        finally:
+            if session.started:
+                session.stop()
 
     def test_revoked_is_a_one_way_door_in_band(self):
         from computer_control.session import SessionError
@@ -499,6 +542,63 @@ class TestGrantChannel(unittest.TestCase):
             session.stop()
 
 
+    def test_host_a11y_opt_out_cancels_pending_snapshot_confirmation(self):
+        emit = EmitRecorder()
+        session = Session(emit=emit,
+                          driver_factory=lambda cfg: NullDriver(enable_a11y=True),
+                          base_config={"safety": {"auth_profile": "read_only",
+                                                  "a11y_snapshot_opt_in": True}})
+        try:
+            session.start({"safety": {"confirm_threshold": "benign"}})
+            result = session.call("a11y.snapshot", {})
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+            request_id = result["result"]["request_id"]
+
+            self.assertTrue(session.apply_host_directive({"a11y_snapshot": False})["ok"])
+
+            self.assertIsNone(session.status()["result"]["pending_confirmation"])
+            resolved = [payload for event, payload in emit.dump()
+                        if event == "safety.confirmation_resolved"]
+            self.assertEqual(len(resolved), 1)
+            self.assertEqual(resolved[0]["request_id"], request_id)
+            self.assertFalse(resolved[0]["approve"])
+            self.assertEqual(resolved[0]["reason"], "cancelled by authorization downgrade")
+
+            confirmation = session.confirm(request_id, approve=True)
+            self.assertFalse(confirmation["ok"])
+            self.assertEqual(confirmation["error"]["code"], "confirmation_not_found")
+            follow_up = session.call("pointer.click", {})
+            self.assertEqual(follow_up["error"]["code"], "not_authorized")
+            self.assertEqual(session.state, "ready")
+        finally:
+            session.stop()
+
+
+    def test_host_a11y_opt_out_preserves_other_allowed_pending_confirmation(self):
+        emit = EmitRecorder()
+        session = Session(emit=emit,
+                          driver_factory=lambda cfg: NullDriver(enable_a11y=True),
+                          base_config={"safety": {"auth_profile": "revoked",
+                                                  "a11y_snapshot_opt_in": True}})
+        try:
+            session.start({"safety": {"confirm_threshold": "benign"}})
+            result = session.call("screen.capture", {})
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+            request_id = result["result"]["request_id"]
+
+            self.assertTrue(session.apply_host_directive({"a11y_snapshot": False})["ok"])
+
+            pending = session.status()["result"]["pending_confirmation"]
+            self.assertEqual(pending["request_id"], request_id)
+            confirmation = session.confirm(request_id, approve=False)
+            self.assertTrue(confirmation["ok"], confirmation)
+            self.assertEqual(confirmation["result"]["status"], "denied")
+        finally:
+            session.stop()
+
+
     def test_restart_over_rpc_cannot_widen(self):
         # stop+start is in-band too: the host's config file caps what a restarted
         # session may ask for.
@@ -601,12 +701,333 @@ class TestApprovalDowngradeRace(unittest.TestCase):
     not execute after the authorization profile narrowed, including through
     the real session worker queue."""
 
+    def test_allowed_pending_batch_survives_profile_downgrade(self):
+        emit = EmitRecorder()
+        driver = NullDriver(enable_a11y=True)
+        session = Session(emit=emit, driver_factory=lambda cfg: driver,
+                          base_config={"safety": {"auth_profile": "full"}})
+        try:
+            session.start({"safety": {"confirm_threshold": "moderate"}})
+            result = session.call("batch.execute", {"items": [{
+                "tool": "pointer.drag",
+                "arguments": {"from": {"x": 1, "y": 1}, "to": {"x": 2, "y": 2}},
+            }]})
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+            request_id = result["result"]["request_id"]
+
+            self.assertTrue(session.configure({"safety": {"auth_profile": "limited"}})["ok"])
+            pending = session.status()["result"]["pending_confirmation"]
+            self.assertEqual(pending["request_id"], request_id)
+            self.assertTrue(session.confirm(request_id, approve=True)["ok"])
+            self.assertTrue(wait_for(lambda: "batch.finished" in emit.types()))
+            self.assertEqual([entry["kind"] for entry in driver.log()], ["drag"])
+        finally:
+            session.stop()
+
+    def test_nested_batch_confirmation_cancelled_on_profile_downgrade(self):
+        from computer_control.actions import MAX_BATCH_NESTING
+
+        emit = EmitRecorder()
+        driver = NullDriver(enable_a11y=True)
+        session = Session(emit=emit, driver_factory=lambda cfg: driver,
+                          base_config={"safety": {"auth_profile": "full"}})
+        try:
+            session.start({"safety": {"confirm_threshold": "moderate"}})
+            items = [
+                {"tool": "pointer.click", "arguments": {}},
+                {"tool": "keyboard.press", "arguments": {"key": "a"}},
+            ]
+            for _ in range(MAX_BATCH_NESTING - 1):
+                items = [{"tool": "batch.execute", "arguments": {"items": items}}]
+
+            result = session.call("batch.execute", {"items": items})
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+            request_id = result["result"]["request_id"]
+
+            self.assertTrue(session.configure({"safety": {"auth_profile": "limited"}})["ok"])
+            resolved = [payload for event, payload in emit.dump()
+                        if event == "safety.confirmation_resolved"]
+            self.assertEqual(len(resolved), 1)
+            self.assertFalse(resolved[0]["approve"])
+            self.assertEqual(resolved[0]["reason"], "cancelled by authorization downgrade")
+
+            confirmation = session.confirm(request_id, approve=True)
+            self.assertFalse(confirmation["ok"])
+            self.assertEqual(confirmation["error"]["code"], "confirmation_not_found")
+            self.assertEqual(driver.log(), [])
+        finally:
+            session.stop()
+
+    def test_nested_batch_confirmation_emits_outside_admission_guard(self):
+        emit = EmitRecorder()
+        session = Session(emit=emit,
+                          driver_factory=lambda cfg: NullDriver(enable_a11y=True),
+                          base_config={"safety": {"auth_profile": "full"}})
+        config_waiting_for_admission = threading.Event()
+        change_finished = threading.Event()
+        inversion_observed = threading.Event()
+        publish_lock_states = []
+        callback_lock_states = []
+        pending_payload_states = []
+        response_request_ids = []
+        inline_approvals = []
+        change_threads = []
+        change_results = []
+        try:
+            session.start({"safety": {"confirm_threshold": "moderate"}})
+            result = session.call("batch.execute", {"items": [{
+                "tool": "batch.execute",
+                "arguments": {"items": [{
+                    "tool": "pointer.drag",
+                    "arguments": {"from": {"x": 1, "y": 1}, "to": {"x": 2, "y": 2}},
+                }]},
+            }]})
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+            outer_request_id = result["result"]["request_id"]
+
+            gate = session._gate
+            original_emit = gate._emit
+            original_reconfigure = gate.reconfigure
+            original_build_response = gate.build_confirmation_response
+            original_callback = gate.on_approved
+
+            def record_built_response(request_id, build_response):
+                response = original_build_response(request_id, build_response)
+                if response is not None:
+                    response_request_ids.append(request_id)
+                return response
+
+            gate.build_confirmation_response = record_built_response
+
+            def check_callback_locks(pending):
+                if pending.request_id != outer_request_id:
+                    callback_lock_states.append((gate._lock._is_owned(),
+                                                 gate._admission_lock._is_owned()))
+                original_callback(pending)
+
+            gate.on_approved = check_callback_locks
+
+            def bounded_reconfigure(cfg):
+                config_waiting_for_admission.set()
+                if not gate._admission_lock.acquire(timeout=0.5):
+                    inversion_observed.set()
+                    return
+                try:
+                    original_reconfigure(cfg)
+                finally:
+                    gate._admission_lock.release()
+
+            gate.reconfigure = bounded_reconfigure
+
+            def change_grant_concurrently():
+                try:
+                    change_results.append(session.configure({
+                        "safety": {"auth_profile": "limited"},
+                    }))
+                finally:
+                    change_finished.set()
+
+            def emit_and_approve_inline(event, payload):
+                original_emit(event, payload)
+                if (event != "safety.confirmation_requested"
+                        or payload["request_id"] == outer_request_id):
+                    return
+
+                publish_lock_states.append((gate._lock._is_owned(),
+                                            gate._admission_lock._is_owned()))
+                pending = gate.pending_confirmation()
+                self.assertIsNotNone(pending)
+                pending_payload_states.append(pending.payload is not None)
+                self.assertIn(payload["request_id"], response_request_ids)
+
+                change_thread = threading.Thread(target=change_grant_concurrently,
+                                                 daemon=True)
+                change_threads.append(change_thread)
+                change_thread.start()
+                self.assertTrue(config_waiting_for_admission.wait(timeout=2))
+
+                inline_approvals.append(session.confirm(
+                    payload["request_id"], approve=True))
+
+            gate._emit = emit_and_approve_inline
+            self.assertTrue(session.confirm(outer_request_id, approve=True)["ok"])
+
+            self.assertTrue(wait_for(lambda: bool(inline_approvals)))
+            self.assertTrue(change_finished.wait(timeout=2))
+            self.assertEqual(len(change_results), 1)
+            self.assertTrue(change_results[0]["ok"], change_results[0])
+            self.assertEqual(change_results[0]["result"]["auth_profile"], "limited")
+            for change_thread in change_threads:
+                change_thread.join(timeout=1)
+
+            nested_request_ids = [
+                payload["request_id"] for event, payload in emit.dump()
+                if event == "safety.confirmation_requested"
+                and payload["request_id"] != outer_request_id
+            ]
+            self.assertEqual(len(nested_request_ids), 1)
+            nested_request_id = nested_request_ids[0]
+            self.assertEqual(len(inline_approvals), 1)
+            self.assertTrue(inline_approvals[0]["ok"], inline_approvals[0])
+            self.assertEqual(inline_approvals[0]["result"]["status"], "approved")
+            resolved = [payload for event, payload in emit.dump()
+                        if event == "safety.confirmation_resolved"
+                        and payload["request_id"] == nested_request_id]
+            self.assertEqual(len(resolved), 1)
+            nested_events = [event for event, payload in emit.dump()
+                             if payload and payload.get("request_id") == nested_request_id]
+            self.assertEqual(nested_events, ["safety.confirmation_requested",
+                                             "safety.confirmation_resolved"])
+            self.assertEqual(publish_lock_states, [(False, False)])
+            self.assertEqual(callback_lock_states, [(False, False)])
+            self.assertEqual(pending_payload_states, [True])
+            self.assertFalse(inversion_observed.is_set())
+        finally:
+            session.stop()
+
+    def test_nested_batch_cancellation_before_response_emits_no_orphan_event(self):
+        emit = EmitRecorder()
+        session = Session(emit=emit,
+                          driver_factory=lambda cfg: NullDriver(enable_a11y=True),
+                          base_config={"safety": {"auth_profile": "full"}})
+        evaluated = threading.Event()
+        continue_evaluation = threading.Event()
+        nested_request_ids = []
+        try:
+            session.start({"safety": {"confirm_threshold": "moderate"}})
+            result = session.call("batch.execute", {"items": [{
+                "tool": "batch.execute",
+                "arguments": {"items": [{
+                    "tool": "pointer.drag",
+                    "arguments": {"from": {"x": 1, "y": 1}, "to": {"x": 2, "y": 2}},
+                }]},
+            }]})
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+
+            gate = session._gate
+            original_evaluate = gate.evaluate
+
+            def pause_after_nested_evaluate(tool, arguments, **kwargs):
+                verdict = original_evaluate(tool, arguments, **kwargs)
+                if tool == "batch.execute" and kwargs.get("defer_confirmation_event"):
+                    nested_request_ids.append(verdict.data["request_id"])
+                    evaluated.set()
+                    if not continue_evaluation.wait(timeout=3):
+                        raise AssertionError("nested evaluation was never released")
+                return verdict
+
+            gate.evaluate = pause_after_nested_evaluate
+            self.assertTrue(session.confirm(result["result"]["request_id"], approve=True)["ok"])
+            self.assertTrue(evaluated.wait(timeout=2))
+
+            pending = gate.pending_confirmation()
+            self.assertIsNotNone(pending)
+            gate.suspend()
+            continue_evaluation.set()
+            self.assertTrue(wait_for(lambda: "batch.finished" in emit.types()))
+
+            request_id = nested_request_ids[0]
+            requested = [payload for event, payload in emit.dump()
+                         if event == "safety.confirmation_requested"
+                         and payload["request_id"] == request_id]
+            resolved = [payload for event, payload in emit.dump()
+                        if event == "safety.confirmation_resolved"
+                        and payload["request_id"] == request_id]
+            self.assertEqual(requested, [])
+            self.assertEqual(resolved, [])
+            self.assertEqual(pending.request_event_state, "deferred")
+        finally:
+            continue_evaluation.set()
+            session.stop()
+
+    def test_confirmation_cancelled_before_run_tool_response(self):
+        cases = (
+            ("keyboard.combo", {"keys": ["win", "r"]}),
+            ("batch.execute", {"items": [{
+                "tool": "pointer.click", "arguments": {"x": 1, "y": 1},
+            }]}),
+        )
+        for tool, arguments in cases:
+            with self.subTest(tool=tool):
+                emit = EmitRecorder()
+                driver = NullDriver(enable_a11y=True)
+                session = Session(emit=emit, driver_factory=lambda cfg: driver,
+                                  base_config={"safety": {"auth_profile": "full"}})
+                try:
+                    session.start({"safety": {"confirm_threshold": "moderate"}})
+                    gate = session._gate
+                    original_build_response = gate.build_confirmation_response
+
+                    def downgrade_then_build_response(request_id, build_response):
+                        self.assertTrue(session.configure({
+                            "safety": {"auth_profile": "read_only"},
+                        })["ok"])
+                        return original_build_response(request_id, build_response)
+
+                    with mock.patch.object(gate, "build_confirmation_response",
+                                           side_effect=downgrade_then_build_response):
+                        result = session.call(tool, arguments)
+
+                    self.assertFalse(result["ok"], result)
+                    self.assertEqual(result["error"]["code"], "confirmation_not_pending")
+                    self.assertIsNone(gate.pending_confirmation())
+                    resolved = [payload for event, payload in emit.dump()
+                                if event == "safety.confirmation_resolved"]
+                    self.assertEqual(len(resolved), 1)
+                    self.assertFalse(resolved[0]["approve"])
+                    self.assertEqual(resolved[0]["reason"],
+                                     "cancelled by authorization downgrade")
+                finally:
+                    session.stop()
+
+    def test_approval_from_event_waits_for_run_tool_response(self):
+        emit = EmitRecorder()
+        driver = NullDriver(enable_a11y=True)
+        session = Session(emit=emit, driver_factory=lambda cfg: driver,
+                          base_config={"safety": {"auth_profile": "full"}})
+        results = {}
+        try:
+            session.start({"safety": {"confirm_threshold": "moderate"}})
+            gate = session._gate
+            original_callback = gate.on_approved
+
+            def check_callback_locks(pending):
+                self.assertFalse(gate._lock._is_owned())
+                self.assertFalse(gate._admission_lock._is_owned())
+                original_callback(pending)
+
+            gate.on_approved = check_callback_locks
+
+            def emit_and_approve(event, payload):
+                emit(event, payload)
+                if event == "safety.confirmation_requested":
+                    results["approval"] = session.confirm(payload["request_id"], approve=True)
+
+            gate._emit = emit_and_approve
+            result = session.call("keyboard.combo", {"keys": ["win", "r"]})
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+            self.assertIn("safety.confirmation_requested", emit.types())
+            self.assertTrue(results["approval"]["ok"], results["approval"])
+            self.assertEqual(results["approval"]["result"]["status"], "approved")
+            self.assertTrue(wait_for(lambda: "action.finished" in emit.types()))
+            self.assertIn("combo", [entry["kind"] for entry in driver.log()])
+        finally:
+            session.stop()
+
     def test_approved_action_refused_when_downgraded_before_execution(self):
         emit = EmitRecorder()
         driver = NullDriver(enable_a11y=True)
         session = Session(emit=emit, driver_factory=lambda cfg: driver,
                           base_config={"safety": {"auth_profile": "full"}})
-        release = release2 = threading.Event()
+        release = threading.Event()
+        release2 = threading.Event()
+        second_blocker_started = threading.Event()
         try:
             session.start({"safety": {"confirm_threshold": "moderate"}})
             # hold the worker so the combo call queues behind a blocker
@@ -624,7 +1045,12 @@ class TestApprovalDowngradeRace(unittest.TestCase):
             rid = results["call"]["result"]["request_id"]
             # block the worker again, approve, then downgrade while the
             # approved action is still queued
-            session._worker_queue.put((release2.wait, threading.Event(), {"result": None}))
+            def block_second_action():
+                second_blocker_started.set()
+                return release2.wait()
+
+            session._worker_queue.put((block_second_action, threading.Event(), {"result": None}))
+            self.assertTrue(second_blocker_started.wait(timeout=5))
             self.assertTrue(session.confirm(rid, approve=True)["ok"])
             self.assertTrue(session.configure({"safety": {"auth_profile": "read_only"}})["ok"])
             release2.set()
@@ -639,6 +1065,291 @@ class TestApprovalDowngradeRace(unittest.TestCase):
                 session.stop()
             except Exception:
                 pass
+
+
+class TestSynchronousEventLockCycle(unittest.TestCase):
+    def test_confirmation_request_timeout_is_snapshotted_before_publication(self):
+        emit = EmitRecorder()
+        session = Session(emit=emit,
+                          driver_factory=lambda cfg: NullDriver(enable_a11y=True),
+                          base_config={"safety": {"auth_profile": "full"}})
+        pending_times = []
+        configure_results = []
+        try:
+            session.start({"safety": {
+                "confirm_threshold": "moderate",
+                "confirm_timeout_s": 30,
+            }})
+            gate = session._gate
+            original_build_response = gate.build_confirmation_response
+
+            def reconfigure_timeout_then_build(request_id, build_response):
+                response = original_build_response(request_id, build_response)
+                pending = gate.pending_confirmation()
+                pending_times.append((pending.created_at, pending.expires_at))
+                configure_results.append(session.configure({
+                    "safety": {"confirm_timeout_s": 60},
+                }))
+                return response
+
+            with mock.patch.object(gate, "build_confirmation_response",
+                                   side_effect=reconfigure_timeout_then_build):
+                result = session.call("keyboard.combo", {"keys": ["win", "r"]})
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+            self.assertTrue(configure_results[0]["ok"], configure_results[0])
+            request = next(payload for event, payload in emit.dump()
+                           if event == "safety.confirmation_requested")
+            self.assertEqual(request["timeout_s"], 30)
+            self.assertAlmostEqual(pending_times[0][1] - pending_times[0][0],
+                                   30, delta=0.01)
+        finally:
+            session.stop()
+
+    def test_confirmation_resolved_callback_can_configure_and_confirm_inline(self):
+        emit = EmitRecorder()
+        session = Session(emit=emit,
+                          driver_factory=lambda cfg: NullDriver(enable_a11y=True),
+                          base_config={"safety": {"auth_profile": "full"}})
+        config_at_reconfigure = threading.Event()
+        configure_finished = threading.Event()
+        confirm_finished = threading.Event()
+        callback_lock_states = []
+        configure_results = []
+        inline_results = []
+        try:
+            session.start({"safety": {"confirm_threshold": "moderate"}})
+            requested = session.call("keyboard.combo", {"keys": ["win", "r"]})
+            self.assertTrue(requested["ok"], requested)
+            request_id = requested["result"]["request_id"]
+
+            gate = session._gate
+            original_reconfigure = gate.reconfigure
+            original_gate_emit = gate._emit
+
+            def observed_reconfigure(cfg):
+                config_at_reconfigure.set()
+                original_reconfigure(cfg)
+
+            gate.reconfigure = observed_reconfigure
+
+            def configure():
+                try:
+                    configure_results.append(session.configure({
+                        "safety": {"auth_profile": "limited"},
+                    }))
+                finally:
+                    configure_finished.set()
+
+            def resolve_and_reenter(event, payload):
+                original_gate_emit(event, payload)
+                if (event != "safety.confirmation_resolved"
+                        or payload.get("request_id") != request_id):
+                    return
+                callback_lock_states.append(gate._admission_lock._is_owned())
+                config_thread = threading.Thread(target=configure, daemon=True)
+                config_thread.start()
+                config_at_reconfigure.wait(timeout=2)
+                inline_results.append(session.confirm("inline-probe", approve=False))
+
+            gate._emit = resolve_and_reenter
+            results = {}
+
+            def deny_confirmation():
+                try:
+                    results["confirm"] = session.confirm(request_id, approve=False)
+                finally:
+                    confirm_finished.set()
+
+            confirm_thread = threading.Thread(target=deny_confirmation, daemon=True)
+            confirm_thread.start()
+            self.assertTrue(confirm_finished.wait(timeout=3),
+                            "confirmation-resolved callback deadlocked with configure/confirm")
+            self.assertTrue(configure_finished.wait(timeout=2))
+            confirm_thread.join(timeout=1)
+
+            self.assertEqual(callback_lock_states, [False])
+            self.assertTrue(results["confirm"]["ok"], results["confirm"])
+            self.assertEqual(results["confirm"]["result"]["status"], "denied")
+            self.assertEqual(len(configure_results), 1)
+            self.assertTrue(configure_results[0]["ok"], configure_results[0])
+            self.assertEqual(len(inline_results), 1)
+            self.assertFalse(inline_results[0]["ok"])
+            self.assertEqual(inline_results[0]["error"]["code"], "confirmation_not_found")
+            resolved = [payload for event, payload in emit.dump()
+                        if event == "safety.confirmation_resolved"
+                        and payload.get("request_id") == request_id]
+            self.assertEqual(len(resolved), 1)
+        finally:
+            if confirm_finished.is_set() and configure_finished.is_set():
+                session.stop()
+
+    def test_confirmation_request_callback_can_configure_and_confirm_inline(self):
+        emit = EmitRecorder()
+        driver = NullDriver(enable_a11y=True)
+        session = Session(emit=emit, driver_factory=lambda cfg: driver,
+                          base_config={"safety": {"auth_profile": "full"}})
+        config_at_reconfigure = threading.Event()
+        configure_finished = threading.Event()
+        call_finished = threading.Event()
+        callback_lock_states = []
+        inline_results = []
+        configure_results = []
+        request_threads = []
+        try:
+            session.start({"safety": {"confirm_threshold": "moderate"}})
+            gate = session._gate
+            original_reconfigure = gate.reconfigure
+            original_gate_emit = gate._emit
+
+            def observed_reconfigure(cfg):
+                config_at_reconfigure.set()
+                original_reconfigure(cfg)
+
+            gate.reconfigure = observed_reconfigure
+
+            def configure():
+                try:
+                    configure_results.append(session.configure({
+                        "safety": {"auth_profile": "limited"},
+                    }))
+                finally:
+                    configure_finished.set()
+
+            def publish_and_reenter(event, payload):
+                original_gate_emit(event, payload)
+                if event != "safety.confirmation_requested":
+                    return
+                callback_lock_states.append(gate._admission_lock._is_owned())
+                thread = threading.Thread(target=configure, daemon=True)
+                request_threads.append(thread)
+                thread.start()
+                config_at_reconfigure.wait(timeout=2)
+                inline_results.append(session.confirm(payload["request_id"], approve=False))
+
+            gate._emit = publish_and_reenter
+            results = {}
+
+            def submit():
+                try:
+                    results["call"] = session.call(
+                        "keyboard.combo", {"keys": ["win", "r"]})
+                finally:
+                    call_finished.set()
+
+            call_thread = threading.Thread(target=submit, daemon=True)
+            call_thread.start()
+            self.assertTrue(call_finished.wait(timeout=3),
+                            "confirmation request callback deadlocked with configure/confirm")
+            call_thread.join(timeout=1)
+            self.assertTrue(configure_finished.wait(timeout=2))
+            for thread in request_threads:
+                thread.join(timeout=1)
+
+            self.assertEqual(callback_lock_states, [False])
+            self.assertEqual(len(configure_results), 1)
+            self.assertTrue(configure_results[0]["ok"], configure_results[0])
+            self.assertEqual(len(inline_results), 1)
+            self.assertFalse(inline_results[0]["ok"])
+            self.assertEqual(inline_results[0]["error"]["code"], "confirmation_not_found")
+            self.assertTrue(results["call"]["ok"], results["call"])
+            self.assertEqual(results["call"]["result"]["status"],
+                             "awaiting_confirmation")
+            request_ids = [payload["request_id"] for event, payload in emit.dump()
+                           if event == "safety.confirmation_requested"]
+            resolved = [payload for event, payload in emit.dump()
+                        if event == "safety.confirmation_resolved"]
+            self.assertEqual(len(request_ids), 1)
+            self.assertEqual(len(resolved), 1)
+            self.assertEqual(resolved[0]["request_id"], request_ids[0])
+            request_events = [event for event, payload in emit.dump()
+                              if payload and payload.get("request_id") == request_ids[0]]
+            self.assertEqual(request_events, ["safety.confirmation_requested",
+                                              "safety.confirmation_resolved"])
+            self.assertEqual(driver.log(), [])
+        finally:
+            if call_finished.is_set() and configure_finished.is_set():
+                session.stop()
+
+    def test_action_started_callback_can_configure_and_confirm_inline(self):
+        emit = EmitRecorder()
+        driver = NullDriver(enable_a11y=True)
+        session = Session(emit=emit, driver_factory=lambda cfg: driver,
+                          base_config={"safety": {"auth_profile": "full"}})
+        config_at_reconfigure = threading.Event()
+        configure_finished = threading.Event()
+        action_finished = threading.Event()
+        callback_lock_states = []
+        inline_results = []
+        configure_results = []
+        action_threads = []
+        try:
+            session.start({"safety": {"confirm_threshold": "moderate"}})
+            requested = session.call("keyboard.combo", {"keys": ["win", "r"]})
+            self.assertTrue(requested["ok"], requested)
+            self.assertEqual(requested["result"]["status"], "awaiting_confirmation")
+            request_id = requested["result"]["request_id"]
+
+            gate = session._gate
+            engine = session._engine
+            original_reconfigure = gate.reconfigure
+            original_engine_emit = engine._emit
+
+            def observed_reconfigure(cfg):
+                config_at_reconfigure.set()
+                original_reconfigure(cfg)
+
+            gate.reconfigure = observed_reconfigure
+
+            def configure():
+                try:
+                    configure_results.append(session.configure({
+                        "safety": {"auth_profile": "limited"},
+                    }))
+                finally:
+                    configure_finished.set()
+
+            def publish_and_reenter(event, payload):
+                original_engine_emit(event, payload)
+                if event == "action.finished":
+                    action_finished.set()
+                if event != "action.started" or payload.get("tool") != "keyboard.combo":
+                    return
+                callback_lock_states.append(gate._admission_lock._is_owned())
+                thread = threading.Thread(target=configure, daemon=True)
+                action_threads.append(thread)
+                thread.start()
+                config_at_reconfigure.wait(timeout=2)
+                inline_results.append(session.confirm("inline-probe", approve=False))
+
+            engine._emit = publish_and_reenter
+            approval = session.confirm(request_id, approve=True)
+            self.assertTrue(approval["ok"], approval)
+            self.assertEqual(approval["result"]["status"], "approved")
+            self.assertTrue(action_finished.wait(timeout=3),
+                            "action.started callback deadlocked with configure/confirm")
+            self.assertTrue(configure_finished.wait(timeout=2))
+            for thread in action_threads:
+                thread.join(timeout=1)
+
+            self.assertEqual(callback_lock_states, [False])
+            self.assertEqual(len(configure_results), 1)
+            self.assertTrue(configure_results[0]["ok"], configure_results[0])
+            self.assertEqual(configure_results[0]["result"]["auth_profile"], "limited")
+            self.assertEqual(len(inline_results), 1)
+            self.assertFalse(inline_results[0]["ok"])
+            self.assertEqual(inline_results[0]["error"]["code"], "confirmation_not_found")
+            self.assertFalse(any(entry["kind"] == "combo" for entry in driver.log()))
+            events = [(event, payload) for event, payload in emit.dump()
+                      if event in ("action.started", "action.finished")
+                      and payload and payload.get("tool") == "keyboard.combo"]
+            self.assertEqual([event for event, _ in events],
+                             ["action.started", "action.finished"])
+            self.assertEqual(events[-1][1]["error_code"], "not_authorized")
+        finally:
+            if action_finished.is_set() and configure_finished.is_set():
+                session.stop()
 
 
 class TestStandbyInteraction(unittest.TestCase):

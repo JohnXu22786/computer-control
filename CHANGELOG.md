@@ -16,7 +16,8 @@ All notable changes are tracked here. Format loosely follows
   active profile in `error.data.auth_profile`. `revoked` is the bottom rung of
   that ladder rather than a fifth state or another emergency stop: it keeps
   `screen.capture` running, cancels a pending confirmation the moment it is
-  entered, and leaves `state` at `ready`. `limited` refuses every `keyboard.*`
+  entered, and changes authorization only while preserving the current
+  operational state (`ready`, `standby`, or `stopped`). `limited` refuses every `keyboard.*`
   action plus `a11y.input` (text injection into a focused node is
   keyboard-equivalent); `read_only` and `revoked` admit `screen.capture`
   unconditionally, and `a11y.snapshot` only after the host opts in.
@@ -25,8 +26,10 @@ All notable changes are tracked here. Format loosely follows
   `safety.auth_profile` or hold it; any widening, including one step up out of
   `revoked`, is rejected with `invalid_config`. `session.start` is capped the
   same way — the profile in the host's own config file bounds a restarted
-  session, so stop-then-restart is not an escape hatch, and a runtime grant
-  does not survive a restart. The host moves profiles in any direction with
+  session, so stop-then-restart is not an escape hatch. The latest effective
+  profile floor on the same `Session` survives stop/start, subject to the
+  host-config cap: a host grant above that cap returns to the cap after
+  restart. The host moves profiles in any direction with
   `Session.grant_profile(new_profile, actor="host")`, a direct Python call
   deliberately absent from the JSON-RPC handler table. Where the host cannot
   make that call (the plugin runs as a stdio subprocess, as under dsh), the
@@ -40,7 +43,8 @@ All notable changes are tracked here. Format loosely follows
   one is, and deleting the file is not a revoke. The path appears in no config
   schema, handler table, manifest entry or event, so the agent can neither
   name nor redirect the channel, and the plugin exposes no file-writing tool.
-  Each change emits a `safety.grant_changed` event.
+  Profile changes emit `safety.grant_changed`; a pure accessibility opt-in/out
+  change emits `session.configured`.
 - Added `safety.a11y_snapshot_opt_in` (default `false`), the host-only key
   that admits `a11y.snapshot` under `read_only` / `revoked`. It is settable
   only through the host's config file or the control-file channel (`a11y_snapshot`

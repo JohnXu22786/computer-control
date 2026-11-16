@@ -7,7 +7,7 @@ import threading
 import time
 import unittest
 
-from computer_control.config import from_dict
+from computer_control.config import ConfigError, from_dict
 from computer_control.policy import PolicyError, SafetyGate
 
 
@@ -251,6 +251,47 @@ class TestAuthorizationProfiles(unittest.TestCase):
     """Authorization profiles are an axis orthogonal to the operational state:
     they narrow which tools clear the gate, and never introduce a state."""
 
+    def test_constructor_rejects_invalid_auth_profile(self):
+        for invalid_profile in ("limitted", None, 7, ["full"]):
+            with self.subTest(profile=invalid_profile):
+                cfg = from_dict({}).safety
+                cfg.auth_profile = invalid_profile
+                with self.assertRaises(ConfigError):
+                    SafetyGate(cfg, emit=EmitRecorder(),
+                               driver_hotkey_probe=lambda keys: False)
+
+    def test_reconfigure_rejects_invalid_auth_profile_without_changing_gate(self):
+        gate = make_gate({"safety": {"auth_profile": "read_only"}})
+
+        for invalid_profile in ("limitted", None, 7, ["full"]):
+            with self.subTest(profile=invalid_profile):
+                cfg = from_dict({}).safety
+                cfg.auth_profile = invalid_profile
+                with self.assertRaises(ConfigError):
+                    gate.reconfigure(cfg)
+                self.assertEqual(gate._cfg.auth_profile, "read_only")
+                self.assertEqual(gate.evaluate("pointer.click", {}).decision,
+                                 "not_authorized")
+                self.assertEqual(gate.evaluate("screen.capture", {}).decision,
+                                 "allow")
+
+    def test_set_grant_rejects_invalid_profiles_without_changing_authorization(self):
+        gate = make_gate({"safety": {"auth_profile": "read_only"}})
+
+        for invalid_profile in ("limitted", None, 7, ["full"]):
+            with self.subTest(profile=invalid_profile):
+                with self.assertRaises(ConfigError):
+                    gate.set_grant(invalid_profile)
+                self.assertEqual(gate.evaluate("pointer.click", {}).decision,
+                                 "not_authorized")
+                self.assertEqual(gate.evaluate("screen.capture", {}).decision,
+                                 "allow")
+
+        gate.set_grant("limited")
+        self.assertEqual(gate.evaluate("pointer.click", {}).decision, "allow")
+        self.assertEqual(gate.evaluate("keyboard.type", {"text": "x"}).decision,
+                         "not_authorized")
+
     def test_read_only_blocks_writes(self):
         gate = make_gate({"safety": {"auth_profile": "read_only"}})
         for tool in ("screen.capture",):
@@ -448,6 +489,67 @@ class TestAuthorizationProfiles(unittest.TestCase):
         with self.assertRaises(PolicyError):
             gate.resolve(rid, approve=True)
 
+    def test_downgrade_ignores_rule_blocked_nested_batch_child(self):
+        emit = EmitRecorder()
+        gate = make_gate({"safety": {
+            "auth_profile": "full",
+            "confirm_threshold": "moderate",
+            "rules": [{"match": {"tool": "keyboard.press"}, "effect": "deny"}],
+        }}, emit=emit)
+        verdict = gate.evaluate("batch.execute", {"items": [{
+            "tool": "batch.execute",
+            "arguments": {"items": [
+                {"tool": "keyboard.press", "arguments": {"key": "a"}},
+                {"tool": "pointer.click", "arguments": {}},
+            ]},
+        }]})
+        self.assertEqual(verdict.decision, "confirm")
+        request_id = verdict.data["request_id"]
+        pending = gate.pending_confirmation()
+        # The outer batch has a plan entry; nested entries are still raw until
+        # that planned batch.execute is dispatched.
+        pending.payload = {"items": [("run", "batch.execute", {
+            "items": [
+                {"tool": "keyboard.press", "arguments": {"key": "a"}},
+                {"tool": "pointer.click", "arguments": {}},
+            ],
+        })]}
+
+        gate.set_grant("limited")
+
+        self.assertIs(gate.pending_confirmation(), pending)
+        self.assertEqual(gate.resolve(request_id, approve=True).status, "approved")
+
+    def test_downgrade_cancels_for_executable_nested_batch_child(self):
+        emit = EmitRecorder()
+        gate = make_gate({"safety": {
+            "auth_profile": "full",
+            "confirm_threshold": "moderate",
+        }}, emit=emit)
+        verdict = gate.evaluate("batch.execute", {"items": [{
+            "tool": "batch.execute",
+            "arguments": {"items": [
+                {"tool": "keyboard.press", "arguments": {"key": "a"}},
+                {"tool": "pointer.click", "arguments": {}},
+            ]},
+        }]})
+        self.assertEqual(verdict.decision, "confirm")
+        request_id = verdict.data["request_id"]
+        pending = gate.pending_confirmation()
+        pending.payload = {"items": [("run", "batch.execute", {
+            "items": [
+                {"tool": "keyboard.press", "arguments": {"key": "a"}},
+                {"tool": "pointer.click", "arguments": {}},
+            ],
+        })]}
+
+        gate.set_grant("limited")
+
+        self.assertIsNone(gate.pending_confirmation())
+        with self.assertRaises(PolicyError) as ctx:
+            gate.resolve(request_id, approve=True)
+        self.assertEqual(ctx.exception.code, "confirmation_not_found")
+
     def test_downgrade_cancels_pending_batch_confirmation_with_a11y_input_subaction(self):
         # a11y.input is keyboard-equivalent injection: a pending batch whose
         # sub-actions include it must be cancelled by a downgrade to limited,
@@ -533,6 +635,87 @@ class TestAuthorizationProfiles(unittest.TestCase):
 
 
 class TestIdleWatchdog(unittest.TestCase):
+    def test_idle_callback_reconfigure_does_not_deadlock_admitted_action(self):
+        cfg = from_dict({"safety": {"idle_timeout_s": 0.01, "idle_action": "none"}})
+        recorded = EmitRecorder()
+        action_has_admission = threading.Event()
+        idle_callback_started = threading.Event()
+        action_attempting_gate = threading.Event()
+        configure_finished = threading.Event()
+        action_finished = threading.Event()
+        second_watchdog_pass = threading.Event()
+        action_result = []
+        thread_errors = []
+
+        gate = None
+
+        def emit(event_type, payload=None):
+            recorded(event_type, payload)
+            if event_type == "session.idle":
+                idle_callback_started.set()
+                if action_attempting_gate.wait(2.0):
+                    gate.reconfigure(cfg.safety)
+                    configure_finished.set()
+
+        gate = SafetyGate(cfg.safety, emit=emit, driver_hotkey_probe=lambda keys: False)
+        expire_pending = gate._expire_pending_locked
+        watchdog_passes = [0]
+
+        def count_watchdog_passes():
+            expire_pending()
+            watchdog_passes[0] += 1
+            if watchdog_passes[0] == 2:
+                second_watchdog_pass.set()
+
+        gate._expire_pending_locked = count_watchdog_passes
+        evaluate_allow_only = gate.evaluate_allow_only
+
+        def synchronized_evaluate(tool, arguments):
+            action_has_admission.set()
+            if not idle_callback_started.wait(2.0):
+                thread_errors.append("watchdog did not emit session.idle")
+                return evaluate_allow_only(tool, arguments)
+            action_attempting_gate.set()
+            return evaluate_allow_only(tool, arguments)
+
+        gate.evaluate_allow_only = synchronized_evaluate
+        gate._last_activity = time.monotonic() - 1.0
+
+        def run_action():
+            try:
+                action_result.append(gate.execute_admitted(
+                    "screen.capture", {}, lambda: "action-ran"))
+            except Exception as exc:
+                thread_errors.append(exc)
+            finally:
+                action_finished.set()
+
+        action_thread = threading.Thread(target=run_action, daemon=True)
+        action_thread.start()
+        self.assertTrue(action_has_admission.wait(2.0), "action did not acquire admission")
+        gate.start_watchdog()
+
+        try:
+            action_completed = action_finished.wait(2.0)
+            configured = configure_finished.wait(2.0)
+            second_pass_completed = second_watchdog_pass.wait(2.0)
+            gate_ready = (gate.state == "ready"
+                          if action_completed and configured else False)
+        finally:
+            gate._stop_event.set()
+            gate._watchdog_thread.join(timeout=1.0)
+            action_thread.join(timeout=1.0)
+
+        self.assertTrue(action_completed, "admitted action deadlocked with the watchdog callback")
+        self.assertTrue(configured, "watchdog callback could not reconfigure the gate")
+        self.assertTrue(second_pass_completed, "watchdog did not complete a subsequent idle check")
+        self.assertTrue(gate_ready, "idle_action=none unexpectedly changed the gate state")
+        self.assertEqual(thread_errors, [])
+        self.assertEqual(len(action_result), 1)
+        self.assertEqual(action_result[0][0].decision, "allow")
+        self.assertEqual(action_result[0][1], "action-ran")
+        self.assertEqual(recorded.types().count("session.idle"), 1)
+
     def test_standby_after_idle(self):
         emit = EmitRecorder()
         gate = make_gate({"safety": {"idle_timeout_s": 0.15, "idle_action": "standby"}}, emit=emit)
@@ -579,6 +762,76 @@ class TestIdleWatchdog(unittest.TestCase):
             self.assertEqual(gate.state, "ready")
         finally:
             gate.close()
+
+
+class TestCallbackPublication(unittest.TestCase):
+    def test_gate_event_and_panic_callbacks_run_after_gate_lock_release(self):
+        def observed_gate(overrides=None):
+            holder = {}
+            callbacks = []
+
+            def emit(event_type, payload=None):
+                callbacks.append((event_type, holder["gate"]._lock._is_owned()))
+
+            gate = make_gate(overrides, emit=emit)
+            holder["gate"] = gate
+            return gate, callbacks
+
+        observed, callbacks = observed_gate({"safety": {"confirm_threshold": "high"}})
+        observed.evaluate("keyboard.combo", {"keys": ["win", "r"]})
+        pending = observed.pending_confirmation()
+        with observed._lock:
+            pending.expires_at = time.monotonic() - 1.0
+        observed.evaluate("screen.capture", {})
+
+        observed.evaluate("keyboard.combo", {"keys": ["win", "r"]})
+        observed.resume()
+        observed.evaluate("keyboard.combo", {"keys": ["win", "r"]})
+        observed.suspend()
+        observed.resume()
+        observed.evaluate("keyboard.combo", {"keys": ["win", "r"]})
+        panic_callbacks = []
+        observed.on_panic_state = lambda active, source: panic_callbacks.append(
+            observed._lock._is_owned())
+        observed.trigger_panic("protocol")
+        observed.release_panic("protocol")
+
+        hotkey, hotkey_events = observed_gate()
+        hotkey_down = [True]
+        hotkey._hotkey_probe = lambda keys: hotkey_down[0]
+        hotkey.evaluate("keyboard.combo", {"keys": ["win", "r"]})
+        hotkey_panic_callbacks = []
+        hotkey.on_panic_state = lambda active, source: hotkey_panic_callbacks.append(
+            hotkey._lock._is_owned())
+        hotkey.poll_hotkey()
+        hotkey_down[0] = False
+        hotkey.poll_hotkey()
+        hotkey_down[0] = True
+        hotkey.poll_hotkey()
+
+        standby, standby_events = observed_gate()
+        standby._state = "standby"
+        standby._hotkey_probe = lambda keys: True
+        standby.poll_hotkey()
+
+        grant, grant_events = observed_gate({"safety": {
+            "auth_profile": "full",
+            "confirm_threshold": "moderate",
+        }})
+        grant.evaluate("keyboard.type", {"text": "x"})
+        grant.set_grant("limited")
+
+        all_events = callbacks + hotkey_events + standby_events + grant_events
+        event_types = [event_type for event_type, _ in all_events]
+        self.assertIn("safety.confirmation_requested", event_types)
+        self.assertIn("safety.confirmation_expired", event_types)
+        self.assertIn("safety.confirmation_resolved", event_types)
+        self.assertIn("safety.panic_triggered", event_types)
+        self.assertIn("safety.panic_released", event_types)
+        self.assertIn("session.resumed", event_types)
+        self.assertTrue(all(not lock_owned for _, lock_owned in all_events), all_events)
+        self.assertEqual(panic_callbacks, [False, False])
+        self.assertEqual(hotkey_panic_callbacks, [False, False])
 
 
 class TestReconfigure(unittest.TestCase):

@@ -1,6 +1,10 @@
 """Unit tests for the engine: execution, coordinate mapping, policy interaction,
 confirmation flow, batch semantics and snapshot staleness."""
 
+import os
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 import unittest
@@ -110,6 +114,81 @@ class TestCapture(unittest.TestCase):
         r = engine.run_tool("screen.capture", {"format": "jpeg"})
         self.assertTrue(r["ok"])
         self.assertTrue(r["result"]["data_url"].startswith("data:image/jpeg;base64,"))
+
+
+class TestCallbackLockInversion(unittest.TestCase):
+    def test_panic_callback_reconfigure_completes_with_admitted_action(self):
+        script = textwrap.dedent("""
+            import threading
+
+            from computer_control.drivers.dummy import NullDriver
+            from computer_control.session import Session
+
+            callback_entered = threading.Event()
+            callback_finished = threading.Event()
+            dispatch_entered = threading.Event()
+            action_finished = threading.Event()
+            panic_finished = threading.Event()
+            errors = []
+            action_results = []
+            session = None
+
+            def emit(event_type, payload=None):
+                if event_type == "safety.panic_triggered":
+                    callback_entered.set()
+                    session.configure({"safety": {"confirm_threshold": "high"}})
+                    callback_finished.set()
+
+            session = Session(emit, driver_factory=lambda cfg: NullDriver(enable_a11y=True))
+            session.start({})
+            engine = session._engine
+
+            def dispatch(tool, arguments):
+                dispatch_entered.set()
+                if not callback_entered.wait(2.0):
+                    raise AssertionError("panic callback did not start during dispatch")
+                return {"ok": True, "result": {}, "error": None, "meta": {}}
+
+            engine._dispatch = dispatch
+
+            def run_action():
+                try:
+                    action_results.append(engine._execute("screen.capture", {}))
+                except BaseException as exc:
+                    errors.append(exc)
+                finally:
+                    action_finished.set()
+
+            def trigger_panic():
+                try:
+                    session._gate.trigger_panic("test")
+                except BaseException as exc:
+                    errors.append(exc)
+                finally:
+                    panic_finished.set()
+
+            action_thread = threading.Thread(target=run_action, daemon=True)
+            action_thread.start()
+            assert dispatch_entered.wait(2.0), "action did not enter dispatch"
+            panic_thread = threading.Thread(target=trigger_panic, daemon=True)
+            panic_thread.start()
+
+            action_thread.join(2.0)
+            panic_thread.join(2.0)
+            assert action_finished.is_set(), "admitted action deadlocked at note_activity"
+            assert panic_finished.is_set(), "panic callback could not finish session.configure"
+            assert callback_finished.is_set(), "session.configure did not return"
+            assert errors == [], errors
+            assert action_results and action_results[0]["ok"], action_results
+        """)
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=os.path.dirname(os.path.dirname(__file__)),
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class TestPointerMapping(unittest.TestCase):
@@ -410,6 +489,33 @@ class TestApprovalRace(unittest.TestCase):
         finished = [p for t, p in emit.dump() if t == "action.finished"]
         self.assertEqual([p.get("error_code") for p in finished], ["not_authorized"])
 
+    def test_approved_batch_rechecks_authorization_after_started_callback(self):
+        engine, driver, gate, emit, approved = self._captured(
+            {"safety": {"confirm_threshold": "moderate"}})
+
+        def downgrade_on_batch_start(event, payload):
+            emit(event, payload)
+            if event == "action.started" and payload.get("tool") == "batch.execute":
+                gate.set_grant("read_only")
+
+        engine._emit = downgrade_on_batch_start
+        result = engine.run_tool("batch.execute", {"items": [
+            {"tool": "pointer.click", "arguments": {"button": "left"}},
+            {"tool": "keyboard.combo", "arguments": {"keys": ["ctrl", "c"]}},
+        ]})
+        self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+        gate.resolve(result["result"]["request_id"], approve=True)
+        engine._on_confirmation_approved(approved[0])
+
+        self.assertEqual(driver.log(), [])
+        self.assertNotIn("batch.finished", emit.types())
+        started = [payload["tool"] for event, payload in emit.dump()
+                   if event == "action.started"]
+        self.assertEqual(started, ["batch.execute"])
+        finished = [(payload["tool"], payload.get("error_code"))
+                    for event, payload in emit.dump() if event == "action.finished"]
+        self.assertEqual(finished, [("batch.execute", "not_authorized")])
+
     def test_approved_batch_item_refused_after_downgrade(self):
         engine, driver, gate, _, approved = self._captured(
             {"safety": {"confirm_threshold": "moderate"}})
@@ -446,6 +552,67 @@ class TestApprovalRace(unittest.TestCase):
             gate.resolve(rid, approve=True)
         self.assertEqual(getattr(ctx.exception, "code", None), "confirmation_not_found")
         self.assertEqual(driver.log(), [])
+
+
+class TestReentrantAdmissionCallback(unittest.TestCase):
+    def test_started_callback_downgrade_refuses_standalone_action(self):
+        engine, driver, gate, emit, _ = make_engine()
+        callback_lock_states = []
+
+        def downgrade_on_start(event, payload):
+            emit(event, payload)
+            if event == "action.started" and payload.get("tool") == "pointer.click":
+                callback_lock_states.append(gate._admission_lock._is_owned())
+                gate.set_grant("read_only")
+
+        engine._emit = downgrade_on_start
+        result = engine.run_tool("pointer.click", {"button": "left"})
+
+        self.assertEqual(callback_lock_states, [False])
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error"]["code"], "not_authorized")
+        self.assertEqual(result["error"]["data"]["auth_profile"], "read_only")
+        self.assertFalse(any(entry["kind"] == "click" for entry in driver.log()))
+        events = emit.dump()
+        started = [payload["tool"] for event, payload in events
+                   if event == "action.started"]
+        finished = [(payload["tool"], payload.get("error_code"))
+                    for event, payload in events if event == "action.finished"]
+        self.assertEqual(started, ["pointer.click"])
+        self.assertEqual(finished, [("pointer.click", "not_authorized")])
+
+    def test_started_callback_downgrade_refuses_keyboard_batch_child(self):
+        engine, driver, gate, emit, _ = make_engine()
+        callback_lock_states = []
+
+        def downgrade_on_child_start(event, payload):
+            emit(event, payload)
+            if event == "action.started" and payload.get("tool") == "keyboard.type":
+                callback_lock_states.append(gate._admission_lock._is_owned())
+                gate.set_grant("limited")
+
+        engine._emit = downgrade_on_child_start
+        result = engine.run_tool("batch.execute", {"items": [{
+            "tool": "keyboard.type", "arguments": {"text": "x"},
+        }]})
+
+        self.assertEqual(callback_lock_states, [False])
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["result"]["status"], "aborted")
+        item = result["result"]["items"][0]
+        self.assertFalse(item["ok"], item)
+        self.assertEqual(item["error"]["code"], "not_authorized")
+        self.assertEqual(item["error"]["data"]["auth_profile"], "limited")
+        self.assertFalse(any(entry["kind"] == "type" for entry in driver.log()))
+        events = emit.dump()
+        started = [payload["tool"] for event, payload in events
+                   if event == "action.started"]
+        finished = [(payload["tool"], payload.get("error_code"))
+                    for event, payload in events if event == "action.finished"]
+        self.assertEqual(started, ["batch.execute", "keyboard.type"])
+        self.assertEqual(finished, [("keyboard.type", "not_authorized"),
+                                    ("batch.execute", None)])
+        self.assertEqual(emit.types().count("batch.finished"), 1)
 
 
 class TestAdmissionAtomicity(unittest.TestCase):
@@ -560,6 +727,70 @@ class TestAdmissionAtomicity(unittest.TestCase):
         self.assertIn("batch.finished", emit.types())
         self.assertEqual(emit.types().count("batch.finished"), 1)
 
+    def test_concurrent_batch_and_single_action_do_not_deadlock(self):
+        engine, _, _, _, _ = make_engine()
+        batch_at_second_item = threading.Event()
+        continue_batch = threading.Event()
+        single_waiting_for_execution = threading.Event()
+        real_execute = engine._execute
+
+        def pause_before_second_item(tool, args, *extra, **kwargs):
+            if tool == "keyboard.type" and args.get("text") == "second":
+                batch_at_second_item.set()
+                continue_batch.wait(timeout=5.0)
+            return real_execute(tool, args, *extra, **kwargs)
+
+        engine._execute = pause_before_second_item
+
+        class ObservedExecutionLock:
+            def __init__(self):
+                self._lock = threading.RLock()
+
+            def __enter__(self):
+                if threading.current_thread().name == "single-action":
+                    single_waiting_for_execution.set()
+                    if not self._lock.acquire(timeout=1.5):
+                        raise TimeoutError("single action blocked on execution lock")
+                else:
+                    self._lock.acquire()
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                self._lock.release()
+
+        engine._execution_lock = ObservedExecutionLock()
+        results = {}
+        batch_thread = threading.Thread(
+            name="batch-action",
+            target=lambda: results.update(r=engine.run_tool("batch.execute", {"items": [
+                {"tool": "keyboard.type", "arguments": {"text": "first"}},
+                {"tool": "keyboard.type", "arguments": {"text": "second"}},
+            ]})),
+        )
+        single_thread = threading.Thread(
+            name="single-action",
+            target=lambda: results.update(r_single=engine.run_tool(
+                "pointer.click", {"button": "left"})),
+        )
+
+        batch_thread.start()
+        try:
+            self.assertTrue(batch_at_second_item.wait(timeout=2.0),
+                            "batch never reached its second item")
+            single_thread.start()
+            self.assertTrue(single_waiting_for_execution.wait(timeout=2.0),
+                            "single action never attempted execution")
+        finally:
+            continue_batch.set()
+
+        batch_thread.join(timeout=5.0)
+        if single_thread.ident is not None:
+            single_thread.join(timeout=5.0)
+        self.assertFalse(batch_thread.is_alive(), "batch thread still running")
+        self.assertFalse(single_thread.is_alive(), "single action thread still running")
+        self.assertTrue(results["r"]["ok"], results["r"])
+        self.assertTrue(results["r_single"]["ok"], results["r_single"])
+
     def test_downgrade_before_batch_prescan_emits_item_refusal_pair(self):
         engine, _, gate, emit, _ = make_engine()
         pre_scan_entered = threading.Event()
@@ -634,6 +865,135 @@ class TestWait(unittest.TestCase):
 
 
 class TestBatch(unittest.TestCase):
+    def test_batch_parent_authorization_is_rechecked_after_downgrade(self):
+        engine, driver, gate, emit, _ = make_engine({
+            "safety": {"auth_profile": "full"},
+        })
+        started_captures = 0
+
+        def downgrade_on_second_capture_start(event, payload):
+            nonlocal started_captures
+            emit(event, payload)
+            if event == "action.started" and payload.get("tool") == "screen.capture":
+                started_captures += 1
+                if started_captures == 2:
+                    # Event subscribers may narrow the grant before the
+                    # child's final authorization check and dispatch.
+                    gate.set_grant("read_only")
+
+        engine._emit = downgrade_on_second_capture_start
+        result = engine.run_tool("batch.execute", {"items": [
+            {"tool": "screen.capture", "arguments": {}},
+            {"tool": "screen.capture", "arguments": {}},
+        ]})
+
+        self.assertEqual(sum(entry["kind"] == "capture" for entry in driver.log()), 1)
+        items = result["result"]["items"]
+        self.assertTrue(items[0]["ok"], items[0])
+        self.assertFalse(items[1]["ok"], items[1])
+        self.assertEqual(items[1]["error"]["code"], "not_authorized")
+        self.assertEqual(items[1]["error"]["data"]["auth_profile"], "read_only")
+        started = [payload["tool"] for event, payload in emit.dump()
+                   if event == "action.started"]
+        self.assertEqual(started, ["batch.execute", "screen.capture", "screen.capture"])
+        finished = [(payload["tool"], payload.get("error_code"))
+                    for event, payload in emit.dump() if event == "action.finished"]
+        self.assertEqual(finished, [
+            ("screen.capture", None),
+            ("screen.capture", "not_authorized"),
+            ("batch.execute", None),
+        ])
+
+    def test_nested_batch_refused_if_started_callback_downgrades_parent(self):
+        engine, driver, gate, emit, _ = make_engine({
+            "safety": {"auth_profile": "full"},
+        })
+        started_batches = 0
+
+        def downgrade_on_nested_batch_start(event, payload):
+            nonlocal started_batches
+            emit(event, payload)
+            if event == "action.started" and payload.get("tool") == "batch.execute":
+                started_batches += 1
+                if started_batches == 2:
+                    gate.set_grant("read_only")
+
+        engine._emit = downgrade_on_nested_batch_start
+        result = engine.run_tool("batch.execute", {"items": [{
+            "tool": "batch.execute",
+            "arguments": {"items": [{"tool": "screen.capture", "arguments": {}}]},
+        }]})
+
+        nested = result["result"]["items"][0]
+        self.assertFalse(nested["ok"], nested)
+        self.assertEqual(nested["error"]["code"], "not_authorized")
+        self.assertEqual(nested["error"]["data"]["auth_profile"], "read_only")
+        self.assertFalse(any(entry["kind"] == "capture" for entry in driver.log()))
+        started = [payload["tool"] for event, payload in emit.dump()
+                   if event == "action.started"]
+        self.assertEqual(started, ["batch.execute", "batch.execute"])
+        finished = [(payload["tool"], payload.get("error_code"))
+                    for event, payload in emit.dump() if event == "action.finished"]
+        self.assertEqual(finished, [
+            ("batch.execute", "not_authorized"),
+            ("batch.execute", None),
+        ])
+        self.assertEqual(emit.types().count("batch.finished"), 1)
+
+    def test_nested_unknown_child_does_not_cancel_confirmation_on_downgrade(self):
+        engine, _, gate, _, _ = make_engine({
+            "safety": {"auth_profile": "full", "confirm_threshold": "benign"},
+        })
+        result = engine.run_tool("batch.execute", {"items": [{
+            "tool": "batch.execute",
+            "arguments": {"items": [
+                {"tool": "keyboard.unknown", "arguments": {}},
+                {"tool": "pointer.click", "arguments": {}},
+            ]},
+        }]})
+        self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+        request_id = result["result"]["request_id"]
+        pending = gate.pending_confirmation()
+
+        gate.set_grant("limited")
+
+        self.assertIs(gate.pending_confirmation(), pending)
+        self.assertEqual(gate.resolve(request_id, approve=False).status, "denied")
+
+    def test_nested_rule_matches_normalized_arguments_before_downgrade(self):
+        engine, _, gate, _, _ = make_engine({
+            "safety": {
+                "auth_profile": "full",
+                "confirm_threshold": "benign",
+                "rules": [{
+                    "match": {
+                        "tool": "keyboard.combo",
+                        "argument": {
+                            "name": "keys",
+                            "matcher": "equals",
+                            "value": ["ctrl", "c"],
+                        },
+                    },
+                    "effect": "deny",
+                }],
+            },
+        })
+        result = engine.run_tool("batch.execute", {"items": [{
+            "tool": "batch.execute",
+            "arguments": {"items": [
+                {"tool": "keyboard.combo", "arguments": {"keys": "ctrl+c"}},
+                {"tool": "pointer.click", "arguments": {}},
+            ]},
+        }]})
+        self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+        request_id = result["result"]["request_id"]
+        pending = gate.pending_confirmation()
+
+        gate.set_grant("limited")
+
+        self.assertIs(gate.pending_confirmation(), pending)
+        self.assertEqual(gate.resolve(request_id, approve=False).status, "denied")
+
     def test_deeply_nested_batch_returns_validation_error_before_execution(self):
         engine, driver, _, _, _ = make_engine()
         nested = {"tool": "wait.pause", "arguments": {"ms": 1}}

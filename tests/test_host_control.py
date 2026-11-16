@@ -6,6 +6,7 @@ tested for start/close, so every semantic test is deterministic (no sleeps).
 
 import json
 import os
+import sys
 import tempfile
 import threading
 import unittest
@@ -18,12 +19,34 @@ from computer_control.session import Session
 from computer_control.drivers.dummy import NullDriver
 
 
+def _supports_host_control_acl_validation():
+    return sys.platform.startswith("linux") or os.name == "nt"
+
+
+class TestUnsupportedHostControlPlatform(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "non-Linux POSIX platform behavior")
+    def test_non_linux_posix_is_unsupported_and_acl_validation_fails_closed(self):
+        with mock.patch.object(sys, "platform", "darwin"):
+            self.assertFalse(_supports_host_control_acl_validation())
+            with tempfile.TemporaryDirectory() as directory:
+                with self.assertRaises(PermissionError):
+                    control_permissions.validate_control_directory(directory)
+
+                path = os.path.join(directory, "control.json")
+                with open(path, "w", encoding="utf-8") as control_file:
+                    control_file.write("{}")
+                with self.assertRaises(PermissionError):
+                    control_permissions.validate_control_file(path)
+
+
 def make_session(base_config=None, emit=None):
     return Session(emit=emit or (lambda t, p=None: None),
                    driver_factory=lambda cfg: NullDriver(enable_a11y=True),
                    base_config=base_config or {})
 
 
+@unittest.skipUnless(_supports_host_control_acl_validation(),
+                     "host control ACL verification is unsupported on this platform")
 class TestChannelParsingAndSeq(unittest.TestCase):
     def setUp(self):
         self._identity_policy = mock.patch.object(
@@ -131,9 +154,56 @@ class TestChannelParsingAndSeq(unittest.TestCase):
         self.write({"seq": 1, "auth_profile": "read_only", "a11y_snapshot": False})
         self.assertTrue(self.channel.poll_once())
 
+    def test_deeply_nested_json_does_not_stop_polling(self):
+        deep_json = "[" * 100_000 + "0" + "]" * 100_000
+        valid_directive = json.dumps({"seq": 1, "auth_profile": "limited",
+                                      "a11y_snapshot": False})
+        with mock.patch("computer_control.host_control.read_control_file",
+                        side_effect=[deep_json, valid_directive]), \
+                mock.patch.object(self.channel._stop, "wait",
+                                  side_effect=[False, False, True]):
+            self.channel._loop()
+
+        self.assertEqual(self.applied,
+                         [{"auth_profile": "limited", "a11y_snapshot": False}])
+        self.assertEqual(self.channel.last_seq, 1)
+        self.assertTrue(any("content is not valid JSON" in note for note in self.notes))
+
     def test_missing_file_is_a_no_op(self):
         self.assertFalse(self.channel.poll_once())
         self.assertEqual(self.notes, [])
+
+    def test_missing_file_starts_without_a_snapshot(self):
+        started_with = []
+        result = self.channel.start_session(lambda directive: started_with.append(directive) or "started")
+        self.assertEqual(result, "started")
+        self.assertEqual(started_with, [None])
+        self.assertEqual(self.channel.last_seq, 0)
+
+    def test_poll_read_error_is_logged_and_sequence_remains_retryable(self):
+        directive = json.dumps({"seq": 1, "auth_profile": "limited",
+                                "a11y_snapshot": False})
+        with mock.patch("computer_control.host_control.read_control_file",
+                        side_effect=[PermissionError("temporary permission failure"),
+                                     OSError("temporary read failure"),
+                                     UnicodeDecodeError("utf-8", b"\xff", 0, 1,
+                                                        "invalid start byte"), directive]):
+            self.assertFalse(self.channel.poll_once())
+            self.assertEqual(self.channel.last_seq, 0)
+            self.assertFalse(self.applied)
+            self.assertTrue(any("temporary permission failure" in note
+                                for note in self.notes))
+            self.assertFalse(self.channel.poll_once())
+            self.assertEqual(self.channel.last_seq, 0)
+            self.assertFalse(self.applied)
+            self.assertTrue(any("temporary read failure" in note for note in self.notes))
+            self.assertFalse(self.channel.poll_once())
+            self.assertEqual(self.channel.last_seq, 0)
+            self.assertFalse(self.applied)
+            self.assertTrue(any("invalid start byte" in note for note in self.notes))
+            self.assertTrue(self.channel.poll_once())
+        self.assertEqual(self.channel.last_seq, 1)
+        self.assertEqual(self.applied, [{"auth_profile": "limited", "a11y_snapshot": False}])
 
     @unittest.skipUnless(os.name == "posix", "POSIX permission bits are checked on POSIX")
     def test_insecure_parent_permissions_rejected(self):
@@ -198,7 +268,89 @@ class TestChannelParsingAndSeq(unittest.TestCase):
         self.assertEqual(self.applied, [{"auth_profile": "limited", "a11y_snapshot": False}])
         self.assertEqual(self.channel.last_seq, 1)
 
+    def test_close_does_not_wait_for_inflight_apply(self):
+        callback_started = threading.Event()
+        release_callback = threading.Event()
+        close_returned = threading.Event()
+        inner_apply = self.channel._apply
 
+        def blocking_apply(directive):
+            callback_started.set()
+            release_callback.wait()
+            return inner_apply(directive)
+
+        self.channel._apply = blocking_apply
+        self.channel.start()
+        poller = self.channel._thread
+        closer = None
+        try:
+            self.write({"seq": 1, "auth_profile": "limited", "a11y_snapshot": False})
+            self.assertTrue(callback_started.wait(2.0))
+            closer = threading.Thread(
+                target=lambda: (self.channel.close(), close_returned.set()), daemon=True)
+            closer.start()
+
+            self.assertTrue(close_returned.wait(2.0), "close waited for the apply callback")
+            self.assertTrue(poller.is_alive())
+            self.assertEqual(self.channel.last_seq, 0)
+        finally:
+            release_callback.set()
+            if closer is not None:
+                closer.join(2.0)
+            self.channel.close()
+            poller.join(2.0)
+
+        self.assertFalse(closer.is_alive() if closer is not None else False)
+        self.assertFalse(poller.is_alive())
+        self.assertEqual(self.channel.last_seq, 1)
+
+    def test_start_after_timed_out_close_waits_for_old_poller_to_exit(self):
+        callback_started = threading.Event()
+        release_callback = threading.Event()
+        inner_apply = self.channel._apply
+
+        def blocking_apply(directive):
+            callback_started.set()
+            release_callback.wait()
+            return inner_apply(directive)
+
+        self.channel._apply = blocking_apply
+        self.write({"seq": 1, "auth_profile": "limited", "a11y_snapshot": False})
+        self.channel.start()
+        poller = self.channel._thread
+        replacement = None
+        try:
+            self.assertTrue(callback_started.wait(2.0))
+            self.channel.close()
+            self.assertTrue(poller.is_alive(), "close should return after its bounded join")
+
+            self.channel.start()
+            replacement = self.channel._thread
+            self.assertIs(replacement, poller,
+                          "start must not replace a poller that is still in its callback")
+
+            release_callback.set()
+            poller.join(2.0)
+            self.assertFalse(poller.is_alive())
+
+            self.channel.start()
+            replacement = self.channel._thread
+            self.assertIsNot(replacement, poller,
+                             "start should work after the previous poller has exited")
+        finally:
+            release_callback.set()
+            self.channel.close()
+            poller.join(2.0)
+            if replacement is not None and replacement is not poller:
+                replacement.join(2.0)
+
+        self.assertEqual(self.channel.last_seq, 1)
+        self.assertEqual(self.applied,
+                         [{"auth_profile": "limited", "a11y_snapshot": False}])
+
+
+@unittest.skipUnless(_supports_host_control_acl_validation(),
+                     "host control ACL verification is unsupported on this platform")
 class TestRouterIntegration(unittest.TestCase):
     def setUp(self):
         self._identity_policy = mock.patch.object(
@@ -278,6 +430,28 @@ class TestRouterIntegration(unittest.TestCase):
                          .get("code"), "not_authorized")
         self.assertTrue(session.call("pointer.click", {})["ok"])
 
+    def test_unreadable_directive_does_not_start_session(self):
+        router = self.make_router()
+        with mock.patch("computer_control.host_control.read_control_file",
+                        side_effect=PermissionError("control file unreadable")):
+            with self.assertRaisesRegex(PermissionError, "control file unreadable"):
+                router.handle({"jsonrpc": "2.0", "id": 1,
+                               "method": "session.start", "params": {}})
+        self.assertIsNotNone(router._session_cache)
+        self.assertFalse(router._session_cache.started)
+        self.assertEqual(router._control_channel.last_seq, 0)
+
+    def test_unexpected_control_file_io_error_does_not_start_session(self):
+        router = self.make_router()
+        with mock.patch("computer_control.host_control.read_control_file",
+                        side_effect=OSError("control I/O failure")):
+            with self.assertRaisesRegex(OSError, "control I/O failure"):
+                router.handle({"jsonrpc": "2.0", "id": 1,
+                               "method": "session.start", "params": {}})
+        self.assertIsNotNone(router._session_cache)
+        self.assertFalse(router._session_cache.started)
+        self.assertEqual(router._control_channel.last_seq, 0)
+
     def test_process_restart_replays_complete_host_snapshot(self):
         base = {"safety": {"auth_profile": "read_only",
                             "a11y_snapshot_opt_in": True}}
@@ -304,7 +478,46 @@ class TestRouterIntegration(unittest.TestCase):
                          "not_authorized")
         self.assertEqual(second_router._control_channel.last_seq, 2)
 
-    def test_directive_stays_pending_until_a_session_is_live(self):
+    def test_process_restart_caps_persisted_snapshot_at_new_base_config(self):
+        first_router = self.make_router({"safety": {"auth_profile": "full"}})
+        first_router.handle({"jsonrpc": "2.0", "id": 1,
+                             "method": "session.start", "params": {}})
+        self.write({"seq": 1, "auth_profile": "full", "a11y_snapshot": False})
+        self.assertTrue(first_router._control_channel.poll_once())
+        first_router._session_cache.stop()
+        first_router.close()
+
+        second_router = self.make_router({"safety": {"auth_profile": "read_only"}})
+        second_router.handle({"jsonrpc": "2.0", "id": 2,
+                             "method": "session.start", "params": {}})
+        session = second_router._session_cache
+        self.assertEqual(session._cfg.safety.auth_profile, "read_only")
+        self.assertEqual((session.call("pointer.click", {}).get("error") or {}).get("code"),
+                         "not_authorized")
+
+    def test_pending_host_grant_overrides_narrow_session_start_profile(self):
+        router = self.make_router({"safety": {"auth_profile": "full"}})
+        self.write({"seq": 1, "auth_profile": "full", "a11y_snapshot": False})
+
+        router.handle({"jsonrpc": "2.0", "id": 1, "method": "session.start",
+                       "params": {"config": {"safety": {"auth_profile": "read_only"}}}})
+        session = router._session_cache
+        self.assertEqual(session._cfg.safety.auth_profile, "full")
+        self.assertTrue(session.call("pointer.click", {})["ok"])
+
+    def test_pending_host_grant_overrides_same_session_profile_floor(self):
+        router = self.make_router({"safety": {"auth_profile": "full"}})
+        router.handle({"jsonrpc": "2.0", "id": 1, "method": "session.start",
+                       "params": {"config": {"safety": {"auth_profile": "read_only"}}}})
+        session = router._session_cache
+        session.stop()
+        self.write({"seq": 1, "auth_profile": "full", "a11y_snapshot": False})
+
+        router.handle({"jsonrpc": "2.0", "id": 2, "method": "session.start", "params": {}})
+        self.assertEqual(session._cfg.safety.auth_profile, "full")
+        self.assertTrue(session.call("pointer.click", {})["ok"])
+
+    def test_pending_directive_is_capped_at_config_on_start(self):
         router = self.make_router({"safety": {"auth_profile": "read_only"}})
         self.write({"seq": 1, "auth_profile": "full", "a11y_snapshot": False})
         self.assertFalse(router._control_channel.poll_once())  # nothing running
@@ -313,8 +526,9 @@ class TestRouterIntegration(unittest.TestCase):
         self.assertEqual(router._control_channel.last_seq, 1)
         with router._session_lock:
             session = router._session_cache
-        self.assertEqual(session._cfg.safety.auth_profile, "full")
-        self.assertTrue(session.call("pointer.click", {})["ok"])
+        self.assertEqual(session._cfg.safety.auth_profile, "read_only")
+        self.assertEqual((session.call("pointer.click", {}).get("error") or {}).get("code"),
+                         "not_authorized")
 
     def test_stop_race_keeps_directive_pending_until_restart(self):
         router = self.make_router({"safety": {"auth_profile": "read_only",

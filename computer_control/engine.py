@@ -39,6 +39,7 @@ class Engine:
         self._snapshot_counter = 0
         self._current_snapshot_id = None
         self._execution_lock = threading.RLock()
+        self._batch_context = threading.local()
         # NOTE: the approval callback is wired by the session (through the
         # worker queue) so approved actions run serialized with everything
         # else. Engine tests may wire it directly.
@@ -61,7 +62,31 @@ class Engine:
             return self._fail("invalid_arguments", "argument validation failed",
                               tool=tool, data={"issues": exc.issues})
 
-        verdict = self._gate.evaluate(tool, args)
+        pending = None
+        with self._gate.admission_guard():
+            verdict = self._gate.evaluate(
+                tool, args, defer_confirmation_event=True,
+                defer_confirmation_publication=True)
+            if verdict.decision == "confirm":
+                pending = self._gate.pending_confirmation()
+                if tool == "batch.execute":
+                    self._stash_batch_payload(args)
+                request_id = verdict.data["request_id"]
+                response = self._gate.build_confirmation_response(
+                    request_id,
+                    lambda: self._ok({
+                        "status": "awaiting_confirmation",
+                        "request_id": request_id,
+                        "risk": verdict.risk,
+                        "reason": verdict.data.get("reason", ""),
+                    }, tool=tool),
+                )
+        if verdict.decision == "confirm":
+            if response is None:
+                self._gate.discard_confirmation_request(pending)
+            elif not self._gate.emit_confirmation_requested(
+                    request_id, deferred_pending=pending):
+                response = None
         if verdict.decision == "deny":
             return self._fail("policy_denied", verdict.reason, tool=tool,
                               data={"rule": verdict.data.get("rule")})
@@ -75,14 +100,14 @@ class Engine:
             return self._fail("not_authorized", verdict.reason, tool=tool,
                               data={"auth_profile": verdict.data.get("auth_profile")})
         if verdict.decision == "confirm":
-            if tool == "batch.execute":
-                self._stash_batch_payload(args)
-            return self._ok({
-                "status": "awaiting_confirmation",
-                "request_id": verdict.data["request_id"],
-                "risk": verdict.risk,
-                "reason": verdict.data.get("reason", ""),
-            }, tool=tool)
+            if response is None:
+                return self._fail(
+                    "confirmation_not_pending",
+                    "confirmation is no longer pending",
+                    tool=tool,
+                    data={"request_id": request_id},
+                )
+            return response
 
         return self._execute(tool, args)
 
@@ -97,6 +122,7 @@ class Engine:
             "items": copy.deepcopy(plan),
             "continue_on_error": bool(args.get("continue_on_error")),
             "gap_ms": args.get("gap_ms"),
+            "batch_authorizations": (copy.deepcopy(args),),
         }
 
     def _apply_config_defaults(self, tool: str, arguments: dict) -> dict:
@@ -126,12 +152,25 @@ class Engine:
                 plan, _, _ = self._build_batch_plan(args.get("items") or [])
                 payload = {"items": plan,
                            "continue_on_error": bool(args.get("continue_on_error")),
-                           "gap_ms": args.get("gap_ms")}
+                           "gap_ms": args.get("gap_ms"),
+                           "batch_authorizations": (copy.deepcopy(args),)}
+            batch_authorizations = (payload.get("batch_authorizations")
+                                   or (pending.arguments or {},))
             started = time.monotonic()
             verdict = self._gate.admit_only(pending.tool, pending.arguments or {})
             self._emit("action.started", {"tool": pending.tool, "arguments": pending.arguments})
             if verdict.decision == "allow":
-                result = self._run_batch_payload(payload)
+                with self._gate.admission_guard():
+                    parent_verdict = self._batch_authorization_failure(batch_authorizations)
+                    if parent_verdict is None:
+                        current_verdict = self._gate.evaluate_allow_only(
+                            pending.tool, pending.arguments or {})
+                        if current_verdict.decision != "allow":
+                            parent_verdict = current_verdict
+                if parent_verdict is not None:
+                    result = self._verdict_failure(parent_verdict, pending.tool)
+                else:
+                    result = self._run_batch_payload(payload, batch_authorizations)
             else:
                 result = self._verdict_failure(verdict, pending.tool)
             self._emit("action.finished", {
@@ -143,19 +182,60 @@ class Engine:
             return
         self._execute(pending.tool, pending.arguments, announce_refusal=True)
 
-    def _execute(self, tool: str, args: dict, announce_refusal: bool = False) -> ResultDict:
+    def _execute(self, tool: str, args: dict, announce_refusal: bool = False,
+                 batch_authorizations=None) -> ResultDict:
         started = time.monotonic()
+        batch_authorizations = tuple(batch_authorizations or ())
+        parent_verdict = None
+        parent_refused_after_start = False
+        started_emitted = False
+
+        def refuse_started_action(verdict):
+            nonlocal parent_refused_after_start
+            parent_refused_after_start = True
+            result = self._verdict_failure(verdict, tool)
+            self._emit("action.finished", {
+                "tool": tool,
+                "ok": False,
+                "duration_ms": int((time.monotonic() - started) * 1000),
+                "error_code": (result.get("error") or {}).get("code"),
+            })
+            return result
 
         def admitted():
-            self._emit("action.started", {"tool": tool, "arguments": args})
+            nonlocal parent_verdict
+            if tool == "batch.execute":
+                with self._gate.admission_guard():
+                    parent_verdict = self._batch_authorization_failure(batch_authorizations)
+                    if parent_verdict is None:
+                        current_verdict = self._gate.evaluate_allow_only(tool, args)
+                        if current_verdict.decision != "allow":
+                            parent_verdict = current_verdict
+            elif batch_authorizations:
+                # execute_admitted rechecks this tool and its arguments after
+                # action.started, then holds admission through this parent
+                # check and the dispatch.
+                parent_verdict = self._batch_authorization_failure(batch_authorizations)
+            if parent_verdict is not None:
+                return (refuse_started_action(parent_verdict)
+                        if tool == "batch.execute" else None)
+            previous_batch_authorizations = getattr(
+                self._batch_context, "authorizations", None)
+            if tool == "batch.execute":
+                self._batch_context.authorizations = batch_authorizations + (args,)
             try:
-                with self._execution_lock:
-                    result = self._dispatch(tool, args)
+                result = self._dispatch(tool, args)
                 self._gate.note_activity()
             except DriverError as exc:
                 result = self._fail(exc.code, exc.message, tool=tool, data=exc.data)
             except Exception as exc:  # defensive: drivers must not take the server down
                 result = self._fail("driver_failed", "unexpected driver error: %s" % exc, tool=tool)
+            finally:
+                if tool == "batch.execute":
+                    if previous_batch_authorizations is None:
+                        del self._batch_context.authorizations
+                    else:
+                        self._batch_context.authorizations = previous_batch_authorizations
             return result
 
         # Every execution - plain, batch-internal, or confirmation-approved -
@@ -166,22 +246,51 @@ class Engine:
         # narrowed the authorization profile is refused here instead of
         # executing.
         #
-        # batch.execute is the exception: its dispatch is a loop of sub-actions
-        # that each re-enter execute_admitted, so wrapping the whole loop would
-        # hold the admission lock until the batch ended and every remaining
-        # item would escape a downgrade. The batch itself gets only the final
-        # check (admit_only); the loop runs outside the lock and each item
-        # takes the lock on its own, so a downgrade lands between items and
-        # the next item's final check refuses it.
+        # batch.execute is the exception: its dispatch is a loop of sub-actions,
+        # so holding the admission lock for the whole loop would prevent a
+        # downgrade from taking effect between items. The batch releases its
+        # final admission check before running the loop. Each child then checks
+        # its own and every enclosing batch authorization under admission, with
+        # the check held through that child's dispatch.
         if tool == "batch.execute":
-            verdict = self._gate.admit_only(tool, args)
+            with self._gate.admission_guard():
+                parent_verdict = self._batch_authorization_failure(batch_authorizations)
+                verdict = (parent_verdict or
+                           self._gate.evaluate_allow_only(tool, args))
+            if parent_verdict is not None:
+                return self._refused(tool, args, parent_verdict, announce_refusal)
             if verdict.decision != "allow":
                 return self._refused(tool, args, verdict, announce_refusal)
-            result = admitted()
+            with self._execution_lock:
+                started_emitted = True
+                self._emit("action.started", {"tool": tool, "arguments": args})
+                result = admitted()
+            if parent_refused_after_start:
+                return result
         else:
-            verdict, result = self._gate.execute_admitted(tool, args, admitted)
+            with self._execution_lock:
+                verdict = self._gate.admit_only(tool, args)
+                if verdict.decision == "allow" and batch_authorizations:
+                    with self._gate.admission_guard():
+                        parent_verdict = self._batch_authorization_failure(
+                            batch_authorizations)
+                if verdict.decision == "allow" and parent_verdict is None:
+                    started_emitted = True
+                    self._emit("action.started", {"tool": tool, "arguments": args})
+                    verdict, result = self._gate.execute_admitted(
+                        tool, args, admitted)
             if verdict.decision != "allow":
+                if parent_verdict is not None:
+                    return self._refused(tool, args, parent_verdict,
+                                         announce_refusal)
+                if started_emitted:
+                    return refuse_started_action(verdict)
                 return self._refused(tool, args, verdict, announce_refusal)
+            if parent_verdict is not None:
+                if started_emitted:
+                    return refuse_started_action(parent_verdict)
+                return self._refused(tool, args, parent_verdict,
+                                     announce_refusal)
         duration_ms = int((time.monotonic() - started) * 1000)
         self._emit("action.finished", {
             "tool": tool,
@@ -191,6 +300,13 @@ class Engine:
         })
         self._attach_meta(result, tool, duration_ms)
         return result
+
+    def _batch_authorization_failure(self, batch_authorizations):
+        for arguments in batch_authorizations:
+            verdict = self._gate.evaluate_allow_only("batch.execute", arguments)
+            if verdict.decision != "allow":
+                return verdict
+        return None
 
     def _refused(self, tool: str, args: dict, verdict, announce_refusal: bool) -> ResultDict:
         result = self._verdict_failure(verdict, tool)
@@ -411,7 +527,9 @@ class Engine:
 
     def _do_batch_execute(self, args: dict) -> ResultDict:
         return self.run_batch(args["items"], continue_on_error=bool(args.get("continue_on_error")),
-                              gap_ms=args.get("gap_ms"))
+                              gap_ms=args.get("gap_ms"),
+                              batch_authorizations=getattr(
+                                  self._batch_context, "authorizations", None))
 
     def _build_batch_plan(self, items: List[dict]):
         plan = []
@@ -455,7 +573,8 @@ class Engine:
         return plan, highest_risk, confirm_reason
 
     def run_batch(self, items: List[dict], continue_on_error: bool = False,
-                  gap_ms: Optional[int] = None) -> ResultDict:
+                  gap_ms: Optional[int] = None,
+                  batch_authorizations=None) -> ResultDict:
         """Execute a list of {tool, arguments} items.
 
         Two phases: a pre-scan validates and gates every item (per-item
@@ -465,36 +584,75 @@ class Engine:
         ``continue_on_error``.
         """
         gap_ms = gap_ms if gap_ms is not None else self._get_cfg().runtime.batch_gap_ms
+        if batch_authorizations is None:
+            batch_authorizations = ({
+                "items": items,
+                "continue_on_error": continue_on_error,
+                "gap_ms": gap_ms,
+            },)
+        else:
+            batch_authorizations = tuple(batch_authorizations)
         plan, needs_confirm_risk, confirm_reason = self._build_batch_plan(items)
 
         if needs_confirm_risk is not None:
-            verdict = self._gate.evaluate("batch.execute", {
+            arguments = {
                 "items": items, "continue_on_error": continue_on_error, "gap_ms": gap_ms
-            })
+            }
+            with self._gate.admission_guard():
+                verdict = self._gate.evaluate(
+                    "batch.execute", arguments, defer_confirmation_event=True,
+                    defer_confirmation_publication=True)
+                if verdict.decision == "confirm":
+                    pending = self._gate.pending_confirmation()
+                    if pending is not None:
+                        pending.payload = {
+                            "items": copy.deepcopy(plan),
+                            "continue_on_error": continue_on_error,
+                            "gap_ms": gap_ms,
+                            "batch_authorizations": copy.deepcopy(batch_authorizations),
+                        }
+                    request_id = verdict.data["request_id"]
+                    response = self._gate.build_confirmation_response(
+                        request_id,
+                        lambda: self._ok({
+                            "status": "awaiting_confirmation",
+                            "request_id": request_id,
+                            "risk": verdict.risk,
+                            "reason": verdict.data.get("reason", ""),
+                        }, tool="batch.execute"),
+                    )
             if verdict.decision == "confirm":
-                pending = self._gate.pending_confirmation()
-                if pending is not None:
-                    pending.payload = {
-                        "items": copy.deepcopy(plan),
-                        "continue_on_error": continue_on_error,
-                        "gap_ms": gap_ms,
-                    }
-                return self._ok({
-                    "status": "awaiting_confirmation",
-                    "request_id": verdict.data["request_id"],
-                    "risk": verdict.risk,
-                    "reason": verdict.data.get("reason", ""),
-                }, tool="batch.execute")
+                if (response is not None
+                        and not self._gate.emit_confirmation_requested(
+                            request_id, deferred_pending=pending)):
+                    response = None
+                if response is None:
+                    return self._fail(
+                        "confirmation_not_pending",
+                        "confirmation is no longer pending",
+                        tool="batch.execute",
+                        data={"request_id": request_id},
+                    )
+                return response
             if verdict.decision != "allow":
                 return self._verdict_failure(verdict, "batch.execute")
 
-        return self._run_batch_payload({"items": plan, "continue_on_error": continue_on_error, "gap_ms": gap_ms})
+        return self._run_batch_payload({
+            "items": plan,
+            "continue_on_error": continue_on_error,
+            "gap_ms": gap_ms,
+            "batch_authorizations": batch_authorizations,
+        }, batch_authorizations)
 
-    def _run_batch_payload(self, payload: dict) -> ResultDict:
+    def _run_batch_payload(self, payload: dict, batch_authorizations=None) -> ResultDict:
         started = time.monotonic()
         plan = payload["items"]
         continue_on_error = bool(payload.get("continue_on_error"))
         gap_ms = payload.get("gap_ms") or 0
+        if batch_authorizations is None:
+            batch_authorizations = payload.get("batch_authorizations", ())
+        else:
+            batch_authorizations = tuple(batch_authorizations)
 
         results = []
         status = "completed"
@@ -510,7 +668,9 @@ class Engine:
                 _, tool, args = entry
                 verdict = self._gate.evaluate_allow_only(tool, args)
                 if verdict.decision == "allow":
-                    result = self._execute(tool, args, announce_refusal=True)
+                    result = self._execute(
+                        tool, args, announce_refusal=True,
+                        batch_authorizations=batch_authorizations)
                 else:
                     result = self._refused(tool, args, verdict, announce_refusal=True)
             results.append(result)
@@ -518,7 +678,12 @@ class Engine:
                 status = "aborted"
                 break
         duration_ms = int((time.monotonic() - started) * 1000)
-        self._emit("batch.finished", {"status": status, "items": len(results), "duration_ms": duration_ms})
+        self._emit("batch.finished", {
+            "status": status,
+            "items": len(results),
+            "results": results,
+            "duration_ms": duration_ms,
+        })
         return self._ok({"status": status, "items": results}, tool="batch.execute")
 
     def _verdict_failure(self, verdict, tool: str) -> ResultDict:

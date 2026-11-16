@@ -23,13 +23,27 @@ atomically - write a temp file in the same directory, then os.replace):
 
 The parent directory and file must be owned by a separate host administrator:
 root on Linux, or LocalSystem / built-in Administrators on Windows. The plugin
-must run unprivileged and have read-only access; its interactive OS identity
-must not have sudo or administrator rights. This separation matters because an
-agent with desktop input could otherwise open a shell as the plugin user and
-rewrite a file owned by that same user. Linux also checks mode bits and access /
-default POSIX ACLs; Windows checks DACLs and opens the file without following a
-reparse point, then validates and reads the same handle. Other POSIX platforms
-fail closed until their ACLs can be verified.
+must run unprivileged and have read-only access; on Linux each process thread's
+permitted, effective, ambient, and inheritable capability sets must be empty,
+and its CapBnd must exclude CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_FOWNER, and
+CAP_SETUID, CAP_SYS_PTRACE, and CAP_SYS_ADMIN. The first four can change file
+ownership, bypass file-mode checks, or switch the filesystem UID to root;
+CAP_SYS_PTRACE can control processes in the same user namespace, including a
+trusted host writer, and CAP_SYS_ADMIN can mount an attacker-controlled
+filesystem over the control path. Inability to inspect these values fails
+closed. Linux also checks mode bits and access/default POSIX ACLs. Windows
+checks DACLs and opens the file without following a reparse point, then
+validates and reads the same handle. Other POSIX platforms fail closed until
+their ACLs can be verified.
+
+The Linux capability check examines only the plugin's own threads; it cannot
+attest same-UID sibling processes or processes launched later. Enforce the
+bounding-set restriction across the entire interactive session, including its
+desktop and terminal launchers, or isolate the host writer and plugin under
+identities that prevent sibling access. Restricting only the plugin process
+does not protect this channel. The plugin's interactive OS identity must not
+have sudo or administrator rights: desktop input could otherwise open a shell
+as that user and rewrite a file owned by the same user.
 
     {"seq": 1, "auth_profile": "full", "a11y_snapshot": true}
 
@@ -92,6 +106,8 @@ class HostControlChannel:
         self._last_seq = 0
         self._last_note = ""
         self._lock = threading.Lock()
+        # Serialize polling and session startup without blocking close on apply.
+        self._poll_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -101,12 +117,15 @@ class HostControlChannel:
 
     @property
     def last_seq(self) -> int:
-        return self._last_seq
+        with self._lock:
+            return self._last_seq
 
     def start(self) -> None:
         with self._lock:
             if self._thread is not None:
-                return
+                if self._thread.is_alive():
+                    return
+                self._thread = None
             self._stop.clear()
             self._thread = threading.Thread(target=self._loop, name="host-control", daemon=True)
             self._thread.start()
@@ -114,10 +133,13 @@ class HostControlChannel:
     def close(self) -> None:
         with self._lock:
             thread = self._thread
-            self._thread = None
             self._stop.set()
         if thread is not None:
             thread.join(timeout=1.0)
+            if not thread.is_alive():
+                with self._lock:
+                    if self._thread is thread:
+                        self._thread = None
 
     def _loop(self) -> None:
         while not self._stop.wait(0.1):
@@ -125,20 +147,27 @@ class HostControlChannel:
 
     def start_session(self, start: Callable[[Optional[dict]], object]):
         """Start with any pending snapshot applied before the session is live."""
-        with self._lock:
-            pending = self._read_pending_locked()
+        with self._poll_lock:
+            with self._lock:
+                pending = self._read_pending_locked()
             if pending is None:
                 return start(None)
             seq, directive = pending
             result = start(directive)
-            self._last_seq = seq
-            self._last_note = ""
+            with self._lock:
+                self._last_seq = seq
+                self._last_note = ""
             return result
 
     def poll_once(self) -> bool:
         """One poll. Returns True when a directive was applied."""
-        with self._lock:
-            pending = self._read_pending_locked()
+        with self._poll_lock:
+            with self._lock:
+                try:
+                    pending = self._read_pending_locked()
+                except (OSError, UnicodeError) as exc:
+                    self._note("control file: could not read directive; will retry (%s)" % exc)
+                    return False
             if pending is None:
                 return False
             seq, directive = pending
@@ -149,25 +178,25 @@ class HostControlChannel:
                 # An apply-side failure must not wedge the channel on one bad
                 # directive forever: consume it and let the host observe the
                 # missing grant_changed / session.configured event and rewrite.
-                self._last_seq = seq
-                self._note("control file: directive seq %d could not be applied: %s" % (seq, exc))
+                with self._lock:
+                    self._last_seq = seq
+                    self._note("control file: directive seq %d could not be applied: %s"
+                               % (seq, exc))
                 return False
             if applied:
-                self._last_seq = seq
-                self._last_note = ""
+                with self._lock:
+                    self._last_seq = seq
+                    self._last_note = ""
             return bool(applied)
 
     def _read_pending_locked(self):
         try:
             raw = read_control_file(self._path)
-        except PermissionError as exc:
-            self._note("control file: unsafe permissions - directive ignored (%s)" % exc)
-            return None
-        except OSError:
-            return None  # no directive file (or transient replace window)
+        except FileNotFoundError:
+            return None  # no directive file
         try:
             doc = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):
             self._note("control file: content is not valid JSON - directive ignored")
             return None
         if not isinstance(doc, dict):
