@@ -506,6 +506,10 @@
       "summary": "A pending confirmation timed out and was denied."
     },
     {
+      "name": "safety.grant_changed",
+      "summary": "The authorization profile changed (in-band narrowing or a host grant)."
+    },
+    {
       "name": "safety.panic_triggered",
       "summary": "The emergency stop engaged (hotkey, protocol request or panic file)."
     },

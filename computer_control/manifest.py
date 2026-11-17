@@ -38,6 +38,7 @@ _EVENTS = [
     {"name": "safety.confirmation_requested", "summary": "A high-risk action is pending human approval; the harness must ask the user."},
     {"name": "safety.confirmation_resolved", "summary": "A pending confirmation was approved or denied."},
     {"name": "safety.confirmation_expired", "summary": "A pending confirmation timed out and was denied."},
+    {"name": "safety.grant_changed", "summary": "The authorization profile changed (in-band narrowing or a host grant)."},
     {"name": "safety.panic_triggered", "summary": "The emergency stop engaged (hotkey, protocol request or panic file)."},
     {"name": "safety.panic_released", "summary": "The emergency stop was disengaged."},
 ]
