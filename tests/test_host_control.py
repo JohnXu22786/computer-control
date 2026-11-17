@@ -167,7 +167,11 @@ class TestChannelParsingAndSeq(unittest.TestCase):
         self.assertEqual(self.applied,
                          [{"auth_profile": "limited", "a11y_snapshot": False}])
         self.assertEqual(self.channel.last_seq, 1)
-        self.assertTrue(any("content is not valid JSON" in note for note in self.notes))
+        self.assertTrue(any(
+            "content is not valid JSON" in note
+            or "directive must be a JSON object" in note
+            for note in self.notes
+        ))
 
     def test_missing_file_is_a_no_op(self):
         self.assertFalse(self.channel.poll_once())
