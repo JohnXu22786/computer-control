@@ -4,7 +4,7 @@
   "name": "computer-control",
   "title": "Computer Control",
   "description": "Desktop control plugin for the dsh harness: screen capture, pointer and keyboard injection, accessibility-tree driven semantic actions, with an emergency stop, allow/deny rules, confirmation flow and idle standby.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "plugin-contributors",
   "license": "MIT",
   "entry": {

@@ -1,6 +1,6 @@
 {
   "name": "dsh-computer-control",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "dsh bundle for computer-control: desktop control (screen capture, pointer/keyboard injection, accessibility-tree semantic actions, safety guards) bridged to the harness over stdio JSON-RPC.",
   "type": "module",
   "main": "index.js",
