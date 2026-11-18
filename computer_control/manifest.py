@@ -7,6 +7,7 @@ root is generated from it (they must match - the check command verifies).
 from __future__ import annotations
 
 from computer_control import actions as act
+from computer_control.version import __version__
 
 MANIFEST_META = {
     "schema_version": 1,
@@ -16,7 +17,7 @@ MANIFEST_META = {
     "description": ("Desktop control plugin for the dsh harness: screen capture, pointer and "
                     "keyboard injection, accessibility-tree driven semantic actions, with an "
                     "emergency stop, allow/deny rules, confirmation flow and idle standby."),
-    "version": "0.1.0",
+    "version": __version__,
     "author": "plugin-contributors",
     "license": "MIT",
     "entry": {"command": ["python", "-m", "computer_control", "serve"], "working_directory": "."},

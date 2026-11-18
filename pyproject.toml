@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "computer-control-plugin"
-version = "0.1.0"
+version = "0.1.1"
 description = "Desktop control plugin for dsh: capture, pointer, keyboard, accessibility-tree semantic actions, and safety guards."
 readme = "README.md"
 requires-python = ">=3.9"

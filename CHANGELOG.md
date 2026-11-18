@@ -3,7 +3,7 @@
 All notable changes are tracked here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## [0.1.1] - 2026-11-17
 
 ### Added
 
@@ -155,3 +155,6 @@ Initial release of the computer-control desktop plugin for dsh.
 - Deny rules always win over allow rules regardless of rule order.
 
 [0.1.0]: https://github.com/JohnXu22786/computer-control/commits/
+
+[Unreleased]: https://github.com/JohnXu22786/computer-control/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/JohnXu22786/computer-control/compare/v0.1.0...v0.1.1
