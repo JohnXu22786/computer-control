@@ -55,36 +55,78 @@ computer-control/
 └── tests/                   # pure-logic and protocol tests (no real hardware)
 ```
 
-## Installing in DSH
+## Using with DSH
 
 ```bash
 dsh plugin --profile demo add github:JohnXu22786/computer-control
 ```
 
-Remove with:
+Replace `demo` with the profile you want to use.
+
+The repository includes a Cordis bundle: `package.json` points to
+`cordis.patch.yml`, and `index.js` starts the Python server and exposes the
+manifest tools to dsh. The bundle requires **Node.js 18.17+** and **Python
+3.9+**. Install the Python package into the same Python environment that dsh
+uses. Profile-level settings can be set in the bundle patch (for example,
+`platform.name: dry-run` for a rehearsal-only setup). To use the released
+`v0.1.1` Python package:
+
+```bash
+python -m pip install "git+https://github.com/JohnXu22786/computer-control.git@v0.1.1"
+python -m computer_control check
+```
+
+The unpinned source install is also available:
+
+```bash
+python -m pip install git+https://github.com/JohnXu22786/computer-control.git
+```
+
+Remove the plugin with:
 
 ```bash
 dsh plugin --profile demo remove computer-control
 ```
 
-### dsh bundle
+### Using with Codex, Claude Code, or another harness
 
-The repo also ships a Cordis bundle so anything that consumes `dsh.bundle`
-manifests can install it the same way: `package.json` declares
-`dsh.bundle.patch` pointing at `cordis.patch.yml`, and `index.js` is the bridge
-a dsh profile loads. It spawns `python -m computer_control serve` as a child
-process and re-exposes every tool from `manifest.json` to the harness over the
-stdio protocol — the Python core is left untouched. Profile-level settings can
-be pinned through the patch row's `config` (e.g. `platform.name: dry-run` for a
-rehearsal-only install).
+**Codex and Claude Code do not currently have a direct integration for this
+plugin.** They commonly connect external tools through MCP, while
+computer-control speaks its own line-delimited JSON-RPC 2.0 protocol. The
+dsh `index.js` bundle is a Cordis adapter, not an MCP server; adding
+`python -m computer_control serve` as an MCP server will not work.
 
-Requirements for the bridge: `node >= 18` and Python 3.9+. Install this
-package and its core dependencies into the Python environment used by dsh; this
-works from any directory:
+A harness that supports custom stdio tools can integrate the protocol by
+starting:
 
 ```bash
-python -m pip install git+https://github.com/JohnXu22786/computer-control.git
+python -m computer_control serve
 ```
+
+The host must send `session.start`, expose `tools.call` or
+`tools.call_batch` as model tools, forward server events, and send
+`session.stop` when the session ends. It must also turn `screen.capture`
+`data_url` results into images the model can inspect. For high-risk actions,
+surface `safety.confirmation_requested` to the user and send
+`session.confirm` only after the user approves; never auto-approve these
+requests. The stdio protocol and examples are documented in
+[`docs/protocol.md`](docs/protocol.md) and
+[`docs/integration.md`](docs/integration.md).
+
+The server can also expose its custom JSON-RPC API over HTTP:
+
+```bash
+python -m computer_control serve --transport http --port 8765
+```
+
+Use `POST /rpc` for requests and `GET /events` for the SSE event stream. This
+is still the plugin's custom JSON-RPC protocol, not MCP. To use it from Codex
+or Claude Code as an MCP tool, a separate MCP adapter must translate MCP tool
+calls and lifecycle into this protocol and preserve image results and human
+confirmation handling.
+
+Full dsh lifecycle, event, and confirmation details are in
+[`docs/integration.md`](docs/integration.md).
 
 ## Installation
 
