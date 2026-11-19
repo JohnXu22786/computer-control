@@ -133,15 +133,12 @@ class Session:
                 base = from_dict(self._base_config) if self._base_config else default_config()
             except ValueError as exc:
                 raise SessionError("invalid_config", "configuration rejected: %s" % exc)
-            configured_profile_ceiling = base.safety.auth_profile
             # session.start is in-band too, so stop+start must not be a way back
-            # up the ladder: the host's own config file is the cap for a session
-            # the agent (re)starts, and a downgrade the agent made earlier is
-            # sticky - the floor survives restarts, so a start that omits
-            # auth_profile still comes up at the narrowed profile (or below)
-            # instead of silently reloading the wider config-file profile. A
-            # host grant above the base-config cap is not retained by restart;
-            # the base config remains authoritative for the next session.
+            # up the ladder: a downgrade the agent made earlier is sticky - the
+            # floor survives restarts, so a start that omits auth_profile still
+            # comes up at the narrowed profile (or below) instead of silently
+            # reloading the wider config-file profile. A host control snapshot
+            # is applied separately below and remains authoritative.
             if self._profile_floor is not None and authorization_widens(self._profile_floor,
                                                                         base.safety.auth_profile):
                 base.safety.auth_profile = self._profile_floor
@@ -157,11 +154,9 @@ class Session:
             profile_before_host = cfg.safety.auth_profile
             if host_directive is not None:
                 # A persistent host snapshot is authoritative and must be in
-                # place before the new gate becomes visible to callers. It is
-                # capped by the original host config, not the agent's start
-                # profile or a sticky floor.
-                if authorization_widens(configured_profile_ceiling, host_profile):
-                    host_profile = configured_profile_ceiling
+                # place before the new gate becomes visible to callers. Its
+                # authority matches apply_host_directive at runtime; the base
+                # config and agent start profile do not cap an explicit grant.
                 cfg.safety.auth_profile = host_profile
                 cfg.safety.a11y_snapshot_opt_in = host_a11y_snapshot_opt_in
             if self._host_a11y_snapshot_opt_in is not None:

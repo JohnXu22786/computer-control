@@ -154,6 +154,11 @@ class HostControlChannel:
                 return start(None)
             seq, directive = pending
             result = start(directive)
+            if isinstance(result, dict) and result.get("ok") is False:
+                # Protocol handlers report session.start failures as a result
+                # object rather than raising. Keep the snapshot pending so a
+                # later start can apply it instead of consuming its sequence.
+                return result
             with self._lock:
                 self._last_seq = seq
                 self._last_note = ""

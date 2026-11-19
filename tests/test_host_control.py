@@ -56,6 +56,9 @@ class TestChannelParsingAndSeq(unittest.TestCase):
         self._windows_acl = mock.patch.object(control_permissions, "_validate_windows_acl")
         self._windows_acl.start()
         self.addCleanup(self._windows_acl.stop)
+        self._linux_acl_path = mock.patch.object(control_permissions, "_validate_linux_acl_path")
+        self._linux_acl_path.start()
+        self.addCleanup(self._linux_acl_path.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.path = os.path.join(self.tmp.name, "control.json")
@@ -183,6 +186,23 @@ class TestChannelParsingAndSeq(unittest.TestCase):
         self.assertEqual(result, "started")
         self.assertEqual(started_with, [None])
         self.assertEqual(self.channel.last_seq, 0)
+
+    def test_failed_start_response_leaves_snapshot_sequence_pending(self):
+        self.write({"seq": 1, "auth_profile": "full", "a11y_snapshot": False})
+        attempts = []
+
+        def start(directive):
+            attempts.append(directive)
+            if len(attempts) == 1:
+                return {"ok": False, "error": {"code": "backend_unavailable"}}
+            return {"ok": True, "result": {"auth_profile": "full"}}
+
+        failed = self.channel.start_session(start)
+        self.assertFalse(failed["ok"])
+        self.assertEqual(self.channel.last_seq, 0)
+        self.assertTrue(self.channel.start_session(start)["ok"])
+        self.assertEqual(self.channel.last_seq, 1)
+        self.assertEqual(len(attempts), 2)
 
     def test_poll_read_error_is_logged_and_sequence_remains_retryable(self):
         directive = json.dumps({"seq": 1, "auth_profile": "limited",
@@ -364,6 +384,9 @@ class TestRouterIntegration(unittest.TestCase):
         self._windows_acl = mock.patch.object(control_permissions, "_validate_windows_acl")
         self._windows_acl.start()
         self.addCleanup(self._windows_acl.stop)
+        self._linux_acl_path = mock.patch.object(control_permissions, "_validate_linux_acl_path")
+        self._linux_acl_path.start()
+        self.addCleanup(self._linux_acl_path.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.path = os.path.join(self.tmp.name, "control.json")
@@ -482,7 +505,7 @@ class TestRouterIntegration(unittest.TestCase):
                          "not_authorized")
         self.assertEqual(second_router._control_channel.last_seq, 2)
 
-    def test_process_restart_caps_persisted_snapshot_at_new_base_config(self):
+    def test_process_restart_applies_persisted_grant_above_new_base_config(self):
         first_router = self.make_router({"safety": {"auth_profile": "full"}})
         first_router.handle({"jsonrpc": "2.0", "id": 1,
                              "method": "session.start", "params": {}})
@@ -495,9 +518,8 @@ class TestRouterIntegration(unittest.TestCase):
         second_router.handle({"jsonrpc": "2.0", "id": 2,
                              "method": "session.start", "params": {}})
         session = second_router._session_cache
-        self.assertEqual(session._cfg.safety.auth_profile, "read_only")
-        self.assertEqual((session.call("pointer.click", {}).get("error") or {}).get("code"),
-                         "not_authorized")
+        self.assertEqual(session._cfg.safety.auth_profile, "full")
+        self.assertTrue(session.call("pointer.click", {})["ok"])
 
     def test_pending_host_grant_overrides_narrow_session_start_profile(self):
         router = self.make_router({"safety": {"auth_profile": "full"}})
@@ -521,7 +543,7 @@ class TestRouterIntegration(unittest.TestCase):
         self.assertEqual(session._cfg.safety.auth_profile, "full")
         self.assertTrue(session.call("pointer.click", {})["ok"])
 
-    def test_pending_directive_is_capped_at_config_on_start(self):
+    def test_pending_host_grant_overrides_read_only_base_on_start(self):
         router = self.make_router({"safety": {"auth_profile": "read_only"}})
         self.write({"seq": 1, "auth_profile": "full", "a11y_snapshot": False})
         self.assertFalse(router._control_channel.poll_once())  # nothing running
@@ -530,9 +552,21 @@ class TestRouterIntegration(unittest.TestCase):
         self.assertEqual(router._control_channel.last_seq, 1)
         with router._session_lock:
             session = router._session_cache
+        self.assertEqual(session._cfg.safety.auth_profile, "full")
+        self.assertTrue(session.call("pointer.click", {})["ok"])
+
+    def test_runtime_host_grant_overrides_read_only_base(self):
+        router = self.make_router({"safety": {"auth_profile": "read_only"}})
+        router.handle({"jsonrpc": "2.0", "id": 1, "method": "session.start", "params": {}})
+        with router._session_lock:
+            session = router._session_cache
         self.assertEqual(session._cfg.safety.auth_profile, "read_only")
-        self.assertEqual((session.call("pointer.click", {}).get("error") or {}).get("code"),
-                         "not_authorized")
+        self.write({"seq": 1, "auth_profile": "full", "a11y_snapshot": False})
+
+        self.assertTrue(router._control_channel.poll_once())
+        self.assertEqual(router._control_channel.last_seq, 1)
+        self.assertEqual(session._cfg.safety.auth_profile, "full")
+        self.assertTrue(session.call("pointer.click", {})["ok"])
 
     def test_stop_race_keeps_directive_pending_until_restart(self):
         router = self.make_router({"safety": {"auth_profile": "read_only",
