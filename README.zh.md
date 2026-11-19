@@ -55,30 +55,70 @@ computer-control/
 └── tests/                   # 纯逻辑与协议测试（不触碰真实硬件）
 ```
 
-## 在 dsh 中安装
+## 在 dsh 中使用
 
 ```bash
 dsh plugin --profile demo add github:JohnXu22786/computer-control
 ```
 
-卸载：
+将 `demo` 替换成目标 profile 名称即可。
+
+仓库同时提供 Cordis bundle：`package.json` 指向 `cordis.patch.yml`，`index.js`
+负责启动 Python 服务并把工具暴露给 dsh。该 bundle 需要 **Node.js 18.17+** 和
+**Python 3.9+**。profile 级设置可以写在 bundle patch 中（例如设置
+`platform.name: dry-run` 进行演练）。请将 Python 包安装到 dsh 实际使用的 Python
+环境中。安装已发布的
+`v0.1.1` Python 包：
+
+```bash
+python -m pip install "git+https://github.com/JohnXu22786/computer-control.git@v0.1.1"
+python -m computer_control check
+```
+
+也可以安装仓库当前默认分支的源码：
+
+```bash
+python -m pip install git+https://github.com/JohnXu22786/computer-control.git
+```
+
+卸载插件：
 
 ```bash
 dsh plugin --profile demo remove computer-control
 ```
 
-### dsh bundle
+### 在 Codex、Claude Code 或其他 harness 中使用
 
-仓库同时提供 Cordis bundle，凡是消费 `dsh.bundle` 清单的环境都可以同样方式安装：`package.json` 声明
-`dsh.bundle.patch` 指向 `cordis.patch.yml`，`index.js` 即 dsh profile 加载的桥接层。它以子进程方式启动
-`python -m computer_control serve`，把 `manifest.json` 中声明的全部工具经 stdio 协议重新暴露给 harness——
-Python 核心保持不变。profile 级设置可通过 patch 行的 `config` 固定（例如 `platform.name: dry-run` 实现只演练安装）。
+**目前 Codex 和 Claude Code 尚不能直接接入本插件。** 它们通常通过 MCP
+连接外部工具，而 computer-control 使用自定义的行分隔 JSON-RPC 2.0 协议。
+仓库中的 dsh `index.js` 是 Cordis 适配器，不是 MCP server；不能把
+`python -m computer_control serve` 直接填进 MCP server 配置。
 
-桥接层要求：`node >= 18` 和 Python 3.9+。请将本包及其核心依赖安装到 dsh 使用的 Python 环境中；以下命令可在任意目录运行：
+支持自定义 stdio 工具的 harness 可以自行接入该协议，启动命令为：
 
 ```bash
-python -m pip install git+https://github.com/JohnXu22786/computer-control.git
+python -m computer_control serve
 ```
+
+宿主需要在启动时发送 `session.start`，把 `tools.call` 或
+`tools.call_batch` 映射为模型工具，转发服务端事件，并在会话结束时发送
+`session.stop`。宿主还需要把 `screen.capture` 返回的 `data_url` 转为模型可读取的
+图片。高风险动作触发 `safety.confirmation_requested` 时，应向用户展示确认请求；
+只有用户明确批准后才能发送 `session.confirm`，不可自动批准。stdio 协议示例见
+[`docs/protocol.md`](docs/protocol.md)，生命周期和事件处理见
+[`docs/integration.md`](docs/integration.md)。
+
+服务也可通过 HTTP 暴露自定义 JSON-RPC API：
+
+```bash
+python -m computer_control serve --transport http --port 8765
+```
+
+请求发往 `POST /rpc`，事件通过 `GET /events` 的 SSE 流接收。这仍然是插件自己的
+JSON-RPC 协议，并非 MCP。要把它作为 Codex 或 Claude Code 的 MCP 工具使用，仍需单独的
+MCP 适配器来转换工具调用和会话生命周期，并正确传递图片结果与人工确认流程。
+
+完整 dsh 生命周期、事件和确认流说明见 [`docs/integration.md`](docs/integration.md)。
 
 ## 安装
 

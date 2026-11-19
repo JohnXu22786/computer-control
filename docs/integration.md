@@ -1,6 +1,25 @@
 # dsh 接入说明（Integration Guide）
 
-本文说明插件化 harness（dsh）如何加载本插件、调用动作、消费事件，以及确认流与安全事件如何呈现给用户。插件本身只需 `python -m computer_control serve`，其余全部由本协议定义。
+本文说明 dsh 如何加载本插件、调用动作、消费事件，以及如何向用户呈现确认和安全事件。dsh 可以通过仓库自带的 Cordis bundle 直接加载本插件。
+
+**兼容性说明：** 插件服务使用自定义的行分隔 JSON-RPC 2.0 协议，不是 MCP server。Codex 和 Claude Code 目前不能直接加载本插件；仓库的 `index.js` 只适配 dsh/Cordis，并非 MCP 适配器。其他 harness 若能接入自定义 stdio 子进程或 HTTP JSON-RPC 服务，可按本文协议自行桥接。若想通过 MCP 使用，则需要另行实现 MCP 适配器。
+
+在 dsh 中安装插件：
+
+```bash
+dsh plugin --profile demo add github:JohnXu22786/computer-control
+```
+
+将 `demo` 替换为目标 profile 名称。
+
+bundle 要求 Node.js 18.17+ 和 Python 3.9+。Python 包必须安装到 dsh 实际调用的 Python 环境；固定安装 v0.1.1：
+
+```bash
+python -m pip install "git+https://github.com/JohnXu22786/computer-control.git@v0.1.1"
+python -m computer_control check
+```
+
+完整安装说明也见 [README.zh.md](../README.zh.md)。
 
 ## 1. 加载流程
 
@@ -131,3 +150,29 @@ dsh 场景下插件是 **stdio 子进程**，宿主调不到 Python 方法 `Sess
 - 模型提示词建议包含：坐标必须在画布内；语义优先；每步截图自检；高风险动作会被人工确认，属正常现象。
 - 超时防护：harness 侧 `tools.call` 超时应大于 `runtime.max_wait_ms`（默认 600s）+ 余量；超时后动作**可能仍在执行**（结果未知，非未执行），需以新截图确认状态。
 - `session.stop` 语义：排队与后续动作立即被拒绝；**正在执行中的注入无法中途打断**（硬件事件流），会执行完毕后结束会话。
+
+## 9. 接入其他 harness
+
+Codex 和 Claude Code 常用 MCP 协议接入外部工具。不能把 `python -m computer_control serve` 直接写入 MCP server 配置：本服务虽然也是 JSON-RPC，但方法名、初始化流程、工具定义和事件格式均为本插件自定义协议。dsh 的 Cordis 桥接层也不能直接充当 MCP server。
+
+如果宿主支持自定义 stdio 工具，启动 Python 子进程：
+
+```bash
+python -m computer_control serve
+```
+
+宿主需要实现以下适配职责：
+
+1. 启动进程并通过 stdin/stdout 读写 UTF-8 行分隔 JSON；stdout 只解析协议消息，stderr 用作日志。
+2. 建立会话：发送 `session.start`，读取 `manifest.json` 或调用 `tools.list` 来发现工具，并将宿主的工具调用映射为 `tools.call` / `tools.call_batch`。
+3. 持续读取服务器发出的 `event` 通知。将 `screen.capture` 的 `data_url` 转为宿主支持的图片内容，便于模型观察屏幕。
+4. 收到 `safety.confirmation_requested` 时，把工具名、参数、风险和超时展示给用户。只有用户明确批准后才调用 `session.confirm`；拒绝、超时应保持拒绝，不能由模型或适配器自动批准。
+5. 会话结束时调用 `session.stop`，然后关闭子进程。
+
+若宿主更适合 HTTP，可运行：
+
+```bash
+python -m computer_control serve --transport http --port 8765
+```
+
+请求通过 `POST /rpc` 发送，事件通过 `GET /events` 的 SSE 流接收。HTTP 传输仍然使用本插件的 JSON-RPC 协议，并不会使服务自动变成 MCP server。完整方法和消息格式见 [`protocol.md`](protocol.md)。
