@@ -161,6 +161,10 @@ class WindowsDriver(BaseDriver):
             "a11y": self._probe_uia(),
         }
 
+    @property
+    def supports_capture_action_frame(self):
+        return self._dpi_mode in ("per-monitor", "per-monitor-v2")
+
     # ------------------------------------------------------------- platform
 
     def _set_dpi_awareness(self) -> str:
@@ -296,14 +300,15 @@ class WindowsDriver(BaseDriver):
         if image.size != (canvas_width, target_height):
             resampling = getattr(Image, "Resampling", Image).LANCZOS
             image = image.resize((canvas_width, target_height), resampling)
+        interval = None
         if grid:
-            image, _ = draw_grid(image)
+            image, interval = draw_grid(image)
         buffer = io.BytesIO()
         if format == "jpeg":
             image.save(buffer, "JPEG", quality=quality)
         else:
             image.save(buffer, "PNG", optimize=False)
-        return CapturePayload(buffer.getvalue(), image.width, image.height, format)
+        return CapturePayload(buffer.getvalue(), image.width, image.height, format, interval)
 
     # ------------------------------------------------------------- pointer
 

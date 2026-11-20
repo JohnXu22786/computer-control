@@ -334,13 +334,15 @@ class Engine:
     # screen.capture --------------------------------------------------------
 
     def _do_screen_capture(self, args: dict, grid: bool = False) -> ResultDict:
-        if args.get("show_grid"):
-            return self._fail("backend_unavailable", "show_grid is not yet available", tool="screen.capture")
+        grid = grid or args.get("show_grid", False)
         if not self._driver.capabilities.get("capture"):
             return self._fail("backend_unavailable",
                               "capture backend is not available on this platform", tool="screen.capture")
         if grid and not getattr(self._driver, "supports_capture_grid", False):
             return self._fail("backend_unavailable", "capture backend does not support grid overlays",
+                              tool="screen.capture")
+        if grid and not getattr(self._driver, "supports_capture_action_frame", False):
+            return self._fail("backend_unavailable", "capture and pointer action frame is unknown",
                               tool="screen.capture")
         try:
             bbox = self._surface.region_to_physical_bbox(args.get("region"))
@@ -360,6 +362,9 @@ class Engine:
             return self._fail(exc.code, exc.message, tool="screen.capture", data=exc.data)
         except ValueError as exc:
             return self._fail("invalid_arguments", str(exc), tool="screen.capture")
+        if grid and not getattr(payload, "grid_interval", None):
+            return self._fail("backend_unavailable", "capture backend did not confirm grid overlay",
+                              tool="screen.capture")
         capture_surface = Surface(
             payload.width, payload.height,
             bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1],
@@ -368,7 +373,7 @@ class Engine:
         self._frame += 1
         mime = "image/png" if payload.format == "png" else "image/jpeg"
         data_url = "data:%s;base64,%s" % (mime, base64.b64encode(payload.bytes).decode("ascii"))
-        return self._ok({
+        result = {
             "frame": self._frame,
             "format": payload.format,
             "width": payload.width,
@@ -393,7 +398,11 @@ class Engine:
                     "physical_pixels_per_unit": capture_surface.scale,
                 },
             },
-        }, tool="screen.capture")
+        }
+        if grid:
+            result["grid"] = {"present": True, "interval": payload.grid_interval,
+                              "action_frame": result["capture_geometry"]["action_frame"].copy()}
+        return self._ok(result, tool="screen.capture")
 
     def _fit_max_area(self, canvas_width: int, bbox: tuple) -> tuple:
         """Fit the capture dimensions under the configured pixel-area cap."""

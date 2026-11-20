@@ -2,6 +2,10 @@
 confirmation flow, batch semantics and snapshot staleness."""
 
 import os
+import base64
+import io
+
+from PIL import Image
 import subprocess
 import sys
 import textwrap
@@ -56,17 +60,52 @@ class TestCapture(unittest.TestCase):
         self.assertIs(engine._action_surface, surface)
         self.assertEqual(engine._frame, first["result"]["frame"])
 
-    def test_show_grid_rejected_without_changing_capture(self):
+    def test_grid_output_matches_capture_frame(self):
         engine, driver, _, _, _ = make_engine()
-        first = engine.run_tool("screen.capture", {"show_grid": False})
-        self.assertTrue(first["ok"], first)
-        surface, frame, log = engine._action_surface, engine._frame, list(driver.log())
+        for fmt, grayscale in (("png", False), ("jpeg", True)):
+            args = {"show_grid": True, "scale": 0.5, "format": fmt, "grayscale": grayscale,
+                    "region": {"x": 100, "y": 50, "width": 400, "height": 200}}
+            result = engine.run_tool("screen.capture", args)
+            self.assertTrue(result["ok"], result)
+            data = result["result"]
+            image = Image.open(io.BytesIO(base64.b64decode(data["data_url"].split(",", 1)[1])))
+            self.assertEqual(image.size, (data["width"], data["height"]))
+            self.assertEqual(image.format, fmt.upper() if fmt == "png" else "JPEG")
+            self.assertEqual(image.mode, "L" if grayscale else "RGB")
+            interval = data["grid"]["interval"]
+            self.assertNotEqual(image.getpixel((interval["x"], 53)), image.getpixel((interval["x"] + 3, 53)))
+            self.assertEqual(data["grid"]["present"], True)
+            self.assertEqual(interval, {"x": 100, "y": 50})
+            self.assertEqual(data["grid"]["action_frame"], data["capture_geometry"]["action_frame"])
+            engine.run_tool("pointer.move", {"x": 40, "y": 30})
+            self.assertEqual([e for e in driver.log() if e["kind"] == "move"][-1]["position"], (200 + 40 * 800 / 960, 100 + 30 * 800 / 960))
+        plain = engine.run_tool("screen.capture", {})["result"]
+        self.assertNotIn("grid", plain)
+
+    def test_grid_unknown_frame_preserves_active_capture(self):
+        engine, driver, _, _, _ = make_engine()
+        first = engine.run_tool("screen.capture", {})
+        surface = engine._action_surface
+        driver.supports_capture_action_frame = False
         result = engine.run_tool("screen.capture", {"show_grid": True})
         self.assertFalse(result["ok"])
-        self.assertIn("grid", str(result).lower())
         self.assertIs(engine._action_surface, surface)
-        self.assertEqual(engine._frame, frame)
-        self.assertEqual(driver.log(), log)
+        self.assertEqual(engine._frame, first["result"]["frame"])
+
+    def test_grid_requires_driver_confirmation(self):
+        engine, driver, _, _, _ = make_engine()
+        first = engine.run_tool("screen.capture", {})
+        surface = engine._action_surface
+        original = driver.capture_with_dimensions
+        def no_confirmation(*args, **kwargs):
+            payload = original(*args, **kwargs)
+            payload.grid_interval = None
+            return payload
+        driver.capture_with_dimensions = no_confirmation
+        result = engine.run_tool("screen.capture", {"show_grid": True})
+        self.assertFalse(result["ok"])
+        self.assertIs(engine._action_surface, surface)
+        self.assertEqual(engine._frame, first["result"]["frame"])
 
     def test_capture_returns_data_url(self):
         engine, driver, _, _, _ = make_engine()

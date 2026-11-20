@@ -101,7 +101,7 @@ def _build_registry() -> dict:
             _p("quality", "int", "JPEG quality 1-100 (ignored for png).", default=85, minimum=1, maximum=100),
             _p("scale", "float", "Relative canvas scale 0.1-1.0; smaller = fewer tokens.", default=1.0, minimum=0.1, maximum=1.0),
             _p("grayscale", "bool", "Convert to grayscale to save tokens.", default=False),
-            _p("show_grid", "bool", "Coordinate grid overlay; true is not yet available.", default=False),
+            _p("show_grid", "bool", "Draw a coordinate grid in the current capture-relative action frame.", default=False),
         ],
         examples=[
             {},
