@@ -30,6 +30,24 @@ class TestWindowsAbsoluteMouse(unittest.TestCase):
                 self.assertEqual(image.mode, "L")
                 self.assertLess(min(image.getdata()), 100)
 
+    def test_grid_jpeg_respects_quality_after_scaling(self):
+        driver = WindowsDriver.__new__(WindowsDriver)
+        source = Image.new("RGB", (400, 200), (128, 128, 128))
+        images = []
+        for quality in (25, 95):
+            payload = driver._encode(source, 200, 100, "jpeg", quality, True, grid=True)
+            image = Image.open(io.BytesIO(payload.bytes))
+            self.assertEqual(image.format, "JPEG")
+            self.assertEqual(image.size, (200, 100))
+            self.assertEqual(image.mode, "L")
+            self.assertEqual(payload.grid_interval, {"x": 20, "y": 20})
+            # The final image's vertical and horizontal grid lines survive JPEG encoding.
+            self.assertLess(image.getpixel((40, 53)), image.getpixel((45, 53)))
+            self.assertLess(image.getpixel((53, 40)), image.getpixel((53, 45)))
+            images.append(image)
+        # JPEG quantization tables reveal whether the requested quality reached the encoder.
+        self.assertGreater(images[0].quantization[0][0], images[1].quantization[0][0])
+
     def test_absolute_move_uses_virtual_desktop_coordinates(self):
         driver = WindowsDriver.__new__(WindowsDriver)
         driver._virtual_screen = (-1920, 0, 3840, 1080)
