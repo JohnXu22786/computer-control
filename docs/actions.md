@@ -1,6 +1,6 @@
 # 动作指南（Actions Guide）
 
-所有动作统一形状：`{"tool": "...", "arguments": {...}}`。坐标均为**模型画布坐标**（见 README「坐标契约」）；超出画布的值会被钳制到画布内。参数校验严格：未知参数、越界值、未知按键名都会报 `invalid_arguments`。
+所有动作统一形状：`{"tool": "...", "arguments": {...}}`。指针坐标使用最近一次成功截图的画布；截图区域则使用桌面画布（详见 [坐标映射](coordinates.md)）。超出画布的指针坐标会被钳制到画布内。参数校验严格：未知参数、越界值、未知按键名都会报 `invalid_arguments`。
 
 ## screen.capture
 
@@ -8,7 +8,7 @@
 
 | 参数 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `region` | object | 无 | `{x, y, width, height}` 模型坐标区域；缺省为全桌面 |
+| `region` | object | 无 | `{x, y, width, height}` 桌面画布坐标区域；缺省为全桌面 |
 | `format` | string | `png` | `png` / `jpeg`（jpeg 更省 token） |
 | `quality` | int | 85 | JPEG 质量 1-100（png 忽略） |
 | `scale` | float | 1.0 | 画布相对缩放 0.1-1.0，越小越省 token |
