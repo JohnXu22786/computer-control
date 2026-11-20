@@ -30,6 +30,25 @@ class TestWindowsAbsoluteMouse(unittest.TestCase):
                 self.assertEqual(image.mode, "L")
                 self.assertLess(min(image.getdata()), 100)
 
+    def test_grid_capture_does_not_use_windows_input_or_mutate_capture(self):
+        for backend in ("mss", "pillow"):
+            with self.subTest(backend=backend):
+                driver = WindowsDriver.__new__(WindowsDriver)
+                driver._capture_backend = backend
+                driver._user32 = Mock()
+                source = Image.new("RGB", (200, 100), "white")
+                original = source.tobytes()
+                with patch.object(driver, "_capture_mss", return_value=source) as mss_grab, \
+                     patch.object(windows_module.ImageGrab, "grab", return_value=source) as pillow_grab:
+                    payload = driver.capture_with_dimensions((0, 0, 200, 100), 200, 100, grid=True)
+                (mss_grab if backend == "mss" else pillow_grab).assert_called_once()
+                driver._user32.assert_not_called()
+                self.assertEqual(driver._user32.mock_calls, [])
+                self.assertEqual(source.tobytes(), original)
+                rendered = Image.open(io.BytesIO(payload.bytes))
+                self.assertNotEqual(rendered.tobytes(), original)
+                self.assertTrue(payload.grid_interval)
+
     def test_grid_jpeg_respects_quality_after_scaling(self):
         driver = WindowsDriver.__new__(WindowsDriver)
         source = Image.new("RGB", (400, 200), (128, 128, 128))
