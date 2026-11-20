@@ -42,6 +42,38 @@ def wait_for(predicate, timeout=2.0, interval=0.01):
 
 
 class TestCapture(unittest.TestCase):
+    def test_default_and_false_grid_preserve_legacy_capture(self):
+        engine, driver, _, _, _ = make_engine()
+        original_capture = driver.capture_with_dimensions
+        calls = []
+
+        # Legacy drivers do not accept a grid keyword or advertise grid support.
+        def legacy_capture(bbox, canvas_width, canvas_height, format, quality, grayscale):
+            calls.append((bbox, canvas_width, canvas_height, format, quality, grayscale))
+            return original_capture(bbox, canvas_width, canvas_height, format, quality, grayscale)
+
+        driver.supports_capture_grid = False
+        driver.supports_capture_action_frame = False
+        driver.capture_with_dimensions = legacy_capture
+        args = {"region": {"x": 100, "y": 50, "width": 400, "height": 200},
+                "scale": 0.5, "format": "jpeg", "quality": 73, "grayscale": True}
+        omitted = engine.run_tool("screen.capture", args)
+        explicit = engine.run_tool("screen.capture", {**args, "show_grid": False})
+        self.assertTrue(omitted["ok"], omitted)
+        self.assertTrue(explicit["ok"], explicit)
+        self.assertEqual(calls[0], calls[1])
+        self.assertEqual(calls[0][3:], ("jpeg", 73, True))
+        first, second = omitted["result"], explicit["result"]
+        self.assertNotIn("grid", first)
+        self.assertNotIn("grid", second)
+        self.assertEqual(first["data_url"], second["data_url"])
+        self.assertEqual(first["width"], second["width"])
+        self.assertEqual(first["height"], second["height"])
+        self.assertEqual(first["canvas"], second["canvas"])
+        # The legacy driver's original unannotated bytes are passed through.
+        payload = original_capture(*calls[0])
+        self.assertEqual(base64.b64decode(first["data_url"].split(",", 1)[1]), payload.bytes)
+
     def test_grid_rejects_legacy_dimension_driver(self):
         engine, driver, _, _, _ = make_engine()
         driver.supports_capture_grid = False
