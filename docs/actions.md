@@ -1,6 +1,6 @@
 # 动作指南（Actions Guide）
 
-所有动作统一形状：`{"tool": "...", "arguments": {...}}`。指针坐标使用最近一次成功截图的画布；截图区域则使用桌面画布（详见 [坐标映射](coordinates.md)）。超出画布的指针坐标会被钳制到画布内。参数校验严格：未知参数、越界值、未知按键名都会报 `invalid_arguments`。
+所有动作统一形状：`{"tool": "...", "arguments": {...}}`。坐标原点在左上角，x 向右、y 向下增大。指针坐标使用最近一次成功截图的画布；截图区域则使用桌面画布（详见 [坐标映射](coordinates.md)）。超出画布的指针坐标会被钳制到画布内。参数校验严格：未知参数、越界值、未知按键名都会报 `invalid_arguments`。
 
 ## screen.capture
 
@@ -13,10 +13,17 @@
 | `quality` | int | 85 | JPEG 质量 1-100（png 忽略） |
 | `scale` | float | 1.0 | 画布相对缩放 0.1-1.0，越小越省 token |
 | `grayscale` | bool | false | 灰度化以省 token |
+| `show_grid` | bool | false | 在返回的图像上绘制当前截图坐标系的网格和标签；必须是布尔值 |
 
-返回：`frame`（单调递增帧号）、`width/height`、`bytes`、`data_url`、`canvas`。`canvas` 描述返回图像的实际尺寸；后续指针坐标按该图像画布映射到对应的物理区域，包括 `scale` 缩放和区域截图。
+返回：`frame`（成功截图的递增帧号）、`format`、`width/height`、`bytes`、`data_url`、`canvas` 和 `capture_geometry`。开启网格时还返回 `grid`，包括 `present: true`、自动选择的 x/y `interval` 和 `action_frame`；默认或 `false` 时没有 `grid`。网格绘制在返回图像中，不改变桌面本身。
 
-示例：`{"region": {"x": 0, "y": 0, "width": 400, "height": 300}, "format": "jpeg", "scale": 0.5}`
+图像左上角为 `(0, 0)`，网格坐标可直接用于后续 `pointer.*` 动作。每次成功截图都会替换指针动作坐标系，包括裁剪或缩放的截图；截图失败时保留上一次坐标系。首次成功截图前使用桌面画布。后续成功截图会改变坐标含义，帧号不会阻止使用过期坐标；桌面布局或目标变化后应重新截图。截图区域 `region` 始终以桌面画布为基准，而非上一张图像。
+
+`capture_geometry.physical_bounds` 是实际截取的物理像素矩形；`image` 是返回图像尺寸。`action_frame` 给出帧号、`capture_relative` 类型、`virtual_desktop` 目标、物理原点、`image_to_action_scale`（两轴均为 1）和 `physical_pixels_per_unit`。指针坐标先钳制到图像范围，再乘以该比例并加上物理原点，得到桌面物理坐标；两轴都使用宽度计算的比例。裁剪会与桌面相交，`scale` 影响输出宽度，面积上限还可能缩小输出；请以返回的尺寸和元数据为准。详细映射及示例见 [坐标映射](coordinates.md)。
+
+`show_grid` 非布尔值、区域完全在桌面外，或图像太小无法绘制可读网格时返回 `invalid_arguments`。截图后端不可用、不支持网格或无法确认截图与指针使用同一动作坐标系、或未确认网格已绘制时返回 `backend_unavailable`；后端截图失败可返回 `driver_failed`。
+
+示例：`{"tool":"screen.capture","arguments":{"region":{"x":0,"y":0,"width":400,"height":300},"format":"jpeg","scale":0.5,"show_grid":true}}`
 
 ## pointer.move
 
