@@ -333,10 +333,13 @@ class Engine:
 
     # screen.capture --------------------------------------------------------
 
-    def _do_screen_capture(self, args: dict) -> ResultDict:
+    def _do_screen_capture(self, args: dict, grid: bool = False) -> ResultDict:
         if not self._driver.capabilities.get("capture"):
             return self._fail("backend_unavailable",
                               "capture backend is not available on this platform", tool="screen.capture")
+        if grid and not getattr(self._driver, "supports_capture_grid", False):
+            return self._fail("backend_unavailable", "capture backend does not support grid overlays",
+                              tool="screen.capture")
         try:
             bbox = self._surface.region_to_physical_bbox(args.get("region"))
         except ValueError as exc:
@@ -345,13 +348,16 @@ class Engine:
         canvas_width = max(1, int(round(self._surface.canvas_width * scale)))
         canvas_width, canvas_height = self._fit_max_area(canvas_width, bbox)
         try:
+            options = {"grid": True} if grid else {}
             payload = self._driver.capture_with_dimensions(
                 bbox=bbox, canvas_width=canvas_width, canvas_height=canvas_height,
                 format=args.get("format") or "png",
                 quality=args.get("quality") or 85,
-                grayscale=bool(args.get("grayscale")))
+                grayscale=bool(args.get("grayscale")), **options)
         except DriverError as exc:
             return self._fail(exc.code, exc.message, tool="screen.capture", data=exc.data)
+        except ValueError as exc:
+            return self._fail("invalid_arguments", str(exc), tool="screen.capture")
         capture_surface = Surface(
             payload.width, payload.height,
             bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1],

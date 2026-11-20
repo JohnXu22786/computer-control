@@ -46,6 +46,7 @@ class BaseDriver(ABC):
     """Contract every platform driver implements."""
 
     platform_name = "abstract"
+    supports_capture_grid = False
 
     capabilities = {
         "capture": False,
@@ -64,13 +65,15 @@ class BaseDriver(ABC):
 
     def capture_with_dimensions(self, bbox: tuple, canvas_width: int, canvas_height: int,
                                 format: str = "png", quality: int = 85,
-                                grayscale: bool = False) -> CapturePayload:
+                                grayscale: bool = False, grid: bool = False) -> CapturePayload:
         """Capture to explicit dimensions when supported by the driver.
 
         Legacy drivers implement only ``capture`` and preserve the bbox aspect
         ratio. They remain usable when that output height matches the requested
         height; otherwise a bounded-area capture cannot be represented safely.
         """
+        if grid:
+            raise DriverError("capture backend does not support grid overlays", code="backend_unavailable")
         left, top, right, bottom = bbox
         expected_height = max(1, int(round((bottom - top) * canvas_width / max(right - left, 1))))
         if canvas_height != expected_height:
