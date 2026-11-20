@@ -64,6 +64,32 @@ class TestCapture(unittest.TestCase):
         moves = [event for event in driver.log() if event["kind"] == "move"]
         self.assertEqual(moves[-1]["position"], (1920.0, 1080.0))
 
+    def test_capture_geometry_describes_actual_frame_and_pointer_mapping(self):
+        engine, driver, _, _, _ = make_engine({"capture": {"max_area": 1024}})
+        engine._surface = Surface.from_physical(100, -150, -50, 150, 90)
+        for args, bounds in (
+            ({"scale": 0.5}, {"x": -150, "y": -50, "width": 150, "height": 90}),
+            ({"scale": 0.5, "region": {"x": 90.2, "y": 10.2, "width": 20, "height": 15}},
+             {"x": -15, "y": -35, "width": 15, "height": 23}),
+        ):
+            with self.subTest(args=args):
+                result = engine.run_tool("screen.capture", args)["result"]
+                geometry = result["capture_geometry"]
+                self.assertEqual(geometry["physical_bounds"], bounds)
+                self.assertEqual(geometry["image"], {"width": result["width"], "height": result["height"], "units": "pixels"})
+                action = geometry["action_frame"]
+                self.assertEqual(action["frame"], result["frame"])
+                self.assertEqual(action["type"], "capture_relative")
+                self.assertEqual(action["target"], "virtual_desktop")
+                self.assertEqual(action["image_to_action_scale"], {"x": 1, "y": 1})
+                scale = bounds["width"] / result["width"]
+                self.assertEqual(action["physical_pixels_per_unit"], scale)
+                point = {"x": min(3, result["width"] - 1), "y": min(2, result["height"] - 1)}
+                engine.run_tool("pointer.move", point)
+                move = [event for event in driver.log() if event["kind"] == "move"][-1]
+                self.assertEqual(move["position"], (bounds["x"] + point["x"] * scale,
+                                                    bounds["y"] + point["y"] * scale))
+
     def test_capture_rejects_non_object_arguments_before_driver_call(self):
         for arguments in ([], None):
             with self.subTest(arguments=arguments):

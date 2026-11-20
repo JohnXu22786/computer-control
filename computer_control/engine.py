@@ -368,6 +368,23 @@ class Engine:
             "bytes": len(payload.bytes),
             "data_url": data_url,
             "canvas": capture_surface.as_dict(),
+            "capture_geometry": {
+                "physical_bounds": {
+                    "x": bbox[0], "y": bbox[1],
+                    "width": bbox[2] - bbox[0], "height": bbox[3] - bbox[1],
+                },
+                "physical_units": "pixels",
+                "image": {"width": payload.width, "height": payload.height, "units": "pixels"},
+                "action_frame": {
+                    "frame": self._frame,
+                    "type": "capture_relative",
+                    "target": "virtual_desktop",
+                    "units": "image_pixels",
+                    "image_to_action_scale": {"x": 1, "y": 1},
+                    "physical_origin": {"x": bbox[0], "y": bbox[1]},
+                    "physical_pixels_per_unit": capture_surface.scale,
+                },
+            },
         }, tool="screen.capture")
 
     def _fit_max_area(self, canvas_width: int, bbox: tuple) -> tuple:
