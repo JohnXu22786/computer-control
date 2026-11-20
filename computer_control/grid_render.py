@@ -9,14 +9,14 @@ def draw_grid(image: Image.Image) -> tuple:
     """Return an annotated copy and axis intervals in capture action units.
 
     Desktop capture action units are pixels of the final image. The input is
-    left untouched so callers may retain the original capture. Images smaller than 16 pixels on either axis or smaller than 64
-    pixels on both axes are returned unannotated to preserve content.
+    left untouched so callers may retain the original capture. Raises
+    ValueError when the image is too small for readable annotations.
     """
     width, height = image.size
     intervals = {"x": max(20, grid_interval(width)), "y": max(20, grid_interval(height))}
     # A label band and readable content cannot coexist on very small images.
-    if min(width, height) < 16 or max(width, height) < 64:
-        return image.copy(), intervals
+    if min(width, height) < 40 or max(width, height) < 64:
+        raise ValueError("Image is too small for a readable coordinate grid")
     x_ticks = grid_ticks(width, width, intervals["x"])
     y_ticks = grid_ticks(height, height, intervals["y"])
     # Alternating light and dark dashes remain visible over either background

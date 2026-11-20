@@ -17,16 +17,17 @@ class TestGridRender(unittest.TestCase):
         self.assertEqual(result.getpixel((53, 53)), original.getpixel((53, 53)))
         self.assertEqual(original.getpixel((40, 53)), (120, 120, 120))
 
-    def test_grayscale_and_tiny_images(self):
-        for size in [(200, 100), (1, 1), (2, 7), (7, 2), (16, 16)]:
+    def test_grayscale_image(self):
+        result, interval = draw_grid(Image.new("L", (200, 100), 128))
+        self.assertEqual(result.size, (200, 100))
+        self.assertEqual(result.mode, "L")
+        self.assertGreaterEqual(min(interval.values()), 1)
+
+    def test_tiny_images_raise_explicit_error(self):
+        for size in [(1, 1), (2, 7), (7, 2), (16, 16), (15, 64), (64, 15), (63, 63), (64, 16), (16, 64), (39, 64)]:
             with self.subTest(size=size):
-                original = Image.new("L", size, 128)
-                result, interval = draw_grid(original)
-                self.assertEqual(result.size, size)
-                self.assertEqual(result.mode, "L")
-                self.assertGreaterEqual(min(interval.values()), 1)
-                if min(size) < 16 or max(size) < 64:
-                    self.assertEqual(result.tobytes(), original.tobytes())
+                with self.assertRaisesRegex(ValueError, "too small"):
+                    draw_grid(Image.new("L", size, 128))
 
     def test_binary_grayscale_keeps_contrasting_marks(self):
         result, _ = draw_grid(Image.new("1", (200, 100), 1))
