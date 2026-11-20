@@ -192,7 +192,16 @@ python examples/demo.py
 
 ### 坐标契约
 
-模型看到的是**画布**而非原始屏幕：截图被缩放到以 `display_width_px`（默认 1920）为宽的等比例画布，模型返回的坐标就在这个画布上；插件按 `scale = 物理宽 / 画布宽` 均匀映射回物理像素后执行。`screen.capture` 结果中带有 `canvas` 字段与 `display_width_px/display_height_px`，模型以此为准。多显示器（含主屏左侧/上方的负坐标区域）与每显示器 DPI 均已在执行层处理。
+模型看到的是**画布**而非原始屏幕：每次 `screen.capture` 的 `canvas.display_width_px` 和 `canvas.display_height_px` 给出返回图像的实际尺寸，后续指针坐标使用该画布。区域截图和可选的 `scale` 缩放也遵循此规则；插件将图像坐标映射回对应的物理区域。执行层处理多显示器（包括主屏左侧或上方的负坐标区域）及每显示器 DPI。截图的 `region` 使用桌面画布坐标，而非上一次裁剪的坐标；裁剪、舍入和示例详见[坐标映射指南](docs/coordinates.md)。
+
+例如，请求网格，查看返回图像，然后点击图像坐标 `(100, 100)` 处的目标（假设该点在图像内）：
+
+```json
+{"tool": "screen.capture", "arguments": {"show_grid": true}}
+{"tool": "pointer.click", "arguments": {"x": 100, "y": 100}}
+```
+
+网格标签使用最近一次成功截图的图像坐标，区域截图或缩放后也是如此。检查截图结果中 `grid.action_frame` 与 `capture_geometry.action_frame` 是否一致；两者描述的都是相对于截图的动作坐标系。网格只绘制在返回的图像中，不会在物理桌面上显示覆盖层。点击后再次截图以验证结果。
 
 ## 安全
 

@@ -202,6 +202,15 @@ All actions, parameters and examples: [`docs/actions.md`](docs/actions.md).
 
 The model sees a **canvas**, not the raw screen: each `screen.capture` result reports the captured image's actual dimensions in `canvas.display_width_px` and `canvas.display_height_px`, and subsequent pointer coordinates use that canvas. This includes the optional `scale` setting and captured regions; the plugin maps image coordinates back to the corresponding physical rectangle. Multi-monitor setups (including negative-coordinate regions left/above the primary display) and per-monitor DPI are handled in the execution layer. Capture regions use the desktop canvas rather than the latest crop; see the [coordinate mapping guide](docs/coordinates.md) for clipping, rounding, and examples.
 
+For example, request a grid, inspect the returned image, and click a target at image coordinate `(100, 100)` (assuming the image contains that point):
+
+```json
+{"tool": "screen.capture", "arguments": {"show_grid": true}}
+{"tool": "pointer.click", "arguments": {"x": 100, "y": 100}}
+```
+
+The grid labels use the latest successful capture's image coordinates, including after a region or scaled capture. Check `grid.action_frame` against `capture_geometry.action_frame` in the capture result; both describe the capture-relative action frame. The grid is drawn only into the returned image, not as an overlay on the physical desktop. Capture again after the click to verify the result.
+
 ## Safety
 
 See [`docs/configuration.md`](docs/configuration.md#safety) and the points below:
