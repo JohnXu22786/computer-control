@@ -440,6 +440,13 @@
           "description": "Convert to grayscale to save tokens.",
           "required": false,
           "default": false
+        },
+        {
+          "name": "show_grid",
+          "type": "bool",
+          "description": "Coordinate grid overlay; true is not yet available.",
+          "required": false,
+          "default": false
         }
       ]
     },

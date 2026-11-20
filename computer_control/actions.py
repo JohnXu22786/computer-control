@@ -101,6 +101,7 @@ def _build_registry() -> dict:
             _p("quality", "int", "JPEG quality 1-100 (ignored for png).", default=85, minimum=1, maximum=100),
             _p("scale", "float", "Relative canvas scale 0.1-1.0; smaller = fewer tokens.", default=1.0, minimum=0.1, maximum=1.0),
             _p("grayscale", "bool", "Convert to grayscale to save tokens.", default=False),
+            _p("show_grid", "bool", "Coordinate grid overlay; true is not yet available.", default=False),
         ],
         examples=[
             {},
@@ -395,7 +396,9 @@ def clean_arguments(tool: str, raw_args, _batch_depth: int = 0) -> dict:
     for param in spec.params:
         if param.name in raw_args:
             raw = raw_args[param.name]
-            if raw is None and not param.required:
+            if tool == "screen.capture" and param.name == "show_grid" and not isinstance(raw, bool):
+                issues.append("show_grid: expected a boolean")
+            elif raw is None and not param.required:
                 cleaned[param.name] = param.default  # explicit null falls back to the default
             else:
                 cleaned[param.name] = _coerce(param, raw, issues, tool)
