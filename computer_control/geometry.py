@@ -98,6 +98,17 @@ class Surface:
         return cls(canvas_width, canvas_height, x, y, w, h)
 
     @property
+    def physical_bbox(self) -> Tuple[int, int, int, int]:
+        """Physical pixel bounds represented by this surface, exclusive at the far edges.
+
+        On a successful capture's action surface these are the clipped, outward
+        rounded bounds passed to the driver, independent of output resizing.
+        """
+        return (self.physical_x, self.physical_y,
+                self.physical_x + self.physical_width,
+                self.physical_y + self.physical_height)
+
+    @property
     def scale(self) -> float:
         """Physical pixels per model pixel (uniform)."""
         return self.physical_width / self.canvas_width
@@ -135,12 +146,7 @@ class Surface:
         regions degrade to a partial capture instead of an out-of-bounds one.
         A region with no intersection raises ``ValueError``."""
         if region is None:
-            return (
-                self.physical_x,
-                self.physical_y,
-                self.physical_x + self.physical_width,
-                self.physical_y + self.physical_height,
-            )
+            return self.physical_bbox
         left = self.physical_x + region["x"] * self.scale
         top = self.physical_y + region["y"] * self.scale
         right = self.physical_x + (region["x"] + region["width"]) * self.scale
