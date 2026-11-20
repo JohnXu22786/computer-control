@@ -1,6 +1,7 @@
 """Focused tests for Windows SendInput event construction."""
 
 import unittest
+import io
 from PIL import Image
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -18,6 +19,17 @@ from computer_control.drivers.windows import (
 
 
 class TestWindowsAbsoluteMouse(unittest.TestCase):
+    def test_grid_is_drawn_on_final_grayscale_image_before_encoding(self):
+        driver = WindowsDriver.__new__(WindowsDriver)
+        for fmt in ("png", "jpeg"):
+            with self.subTest(format=fmt):
+                payload = driver._encode(Image.new("RGB", (400, 200), "white"),
+                                         200, 100, fmt, 73, True, grid=True)
+                image = Image.open(io.BytesIO(payload.bytes))
+                self.assertEqual(image.size, (200, 100))
+                self.assertEqual(image.mode, "L")
+                self.assertLess(min(image.getdata()), 100)
+
     def test_absolute_move_uses_virtual_desktop_coordinates(self):
         driver = WindowsDriver.__new__(WindowsDriver)
         driver._virtual_screen = (-1920, 0, 3840, 1080)

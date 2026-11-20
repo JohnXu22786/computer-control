@@ -29,6 +29,7 @@ from typing import List, Optional
 from computer_control.config import Config
 from computer_control.drivers.base import BaseDriver, CapturePayload, DriverError
 from computer_control.keys import parse_key, parse_key_full
+from computer_control.grid_render import draw_grid
 
 try:  # Pillow is a hard dependency; fail loudly at import if it is missing.
     from PIL import Image, ImageGrab
@@ -138,6 +139,7 @@ def _mss_installed() -> bool:
 class WindowsDriver(BaseDriver):
     """The fully implemented Windows platform driver."""
 
+    supports_capture_grid = True
     platform_name = "windows"
 
     def __init__(self, cfg: Optional[Config] = None, log=None):
@@ -258,12 +260,12 @@ class WindowsDriver(BaseDriver):
     # ------------------------------------------------------------- capture
 
     def capture(self, bbox: tuple, canvas_width: int, format: str = "png",
-                quality: int = 85, grayscale: bool = False) -> CapturePayload:
-        return self.capture_with_dimensions(bbox, canvas_width, None, format, quality, grayscale)
+                quality: int = 85, grayscale: bool = False, grid: bool = False) -> CapturePayload:
+        return self.capture_with_dimensions(bbox, canvas_width, None, format, quality, grayscale, grid)
 
     def capture_with_dimensions(self, bbox: tuple, canvas_width: int,
                                 canvas_height: Optional[int], format: str = "png",
-                                quality: int = 85, grayscale: bool = False) -> CapturePayload:
+                                quality: int = 85, grayscale: bool = False, grid: bool = False) -> CapturePayload:
         left, top, right, bottom = bbox
         width = max(1, int(right - left))
         height = max(1, int(bottom - top))
@@ -274,7 +276,7 @@ class WindowsDriver(BaseDriver):
                 image = ImageGrab.grab(bbox=(left, top, right, bottom), all_screens=True)
         except Exception as exc:
             raise DriverError("capture failed: %s" % exc, code="driver_failed")
-        return self._encode(image, canvas_width, canvas_height, format, quality, grayscale)
+        return self._encode(image, canvas_width, canvas_height, format, quality, grayscale, grid)
 
     def _capture_mss(self, left, top, width, height) -> Image.Image:
         import mss
@@ -284,7 +286,7 @@ class WindowsDriver(BaseDriver):
         return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
 
     def _encode(self, image: Image.Image, canvas_width: int, canvas_height: Optional[int], format: str,
-                quality: int, grayscale: bool) -> CapturePayload:
+                quality: int, grayscale: bool, grid: bool = False) -> CapturePayload:
         if image.mode != "RGB":
             image = image.convert("RGB")
         if grayscale:
@@ -294,6 +296,8 @@ class WindowsDriver(BaseDriver):
         if image.size != (canvas_width, target_height):
             resampling = getattr(Image, "Resampling", Image).LANCZOS
             image = image.resize((canvas_width, target_height), resampling)
+        if grid:
+            image, _ = draw_grid(image)
         buffer = io.BytesIO()
         if format == "jpeg":
             image.save(buffer, "JPEG", quality=quality)

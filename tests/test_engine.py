@@ -38,6 +38,24 @@ def wait_for(predicate, timeout=2.0, interval=0.01):
 
 
 class TestCapture(unittest.TestCase):
+    def test_grid_rejects_legacy_dimension_driver(self):
+        engine, driver, _, _, _ = make_engine()
+        driver.supports_capture_grid = False
+        driver.capture_with_dimensions = lambda bbox, canvas_width, canvas_height, format, quality, grayscale: None
+        result = engine._do_screen_capture({}, grid=True)
+        self.assertFalse(result["ok"])
+        self.assertIn("backend_unavailable", str(result))
+
+    def test_grid_failure_preserves_latest_capture(self):
+        engine, _, _, _, _ = make_engine()
+        first = engine._do_screen_capture({})
+        surface = engine._action_surface
+        failed = engine._do_screen_capture({"scale": 0.001}, grid=True)
+        self.assertFalse(failed["ok"])
+        self.assertIn("small", str(failed).lower())
+        self.assertIs(engine._action_surface, surface)
+        self.assertEqual(engine._frame, first["result"]["frame"])
+
     def test_capture_returns_data_url(self):
         engine, driver, _, _, _ = make_engine()
         r = engine.run_tool("screen.capture", {})

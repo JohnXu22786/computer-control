@@ -59,6 +59,7 @@ class NullDriver(BaseDriver):
     """Records every call into a thread-safe log. ``enable_a11y`` toggles the
     fake accessibility backend so capability advertisement can be tested."""
 
+    supports_capture_grid = True
     platform_name = "dry-run"
 
     def __init__(self, enable_a11y: bool = False):
@@ -86,17 +87,30 @@ class NullDriver(BaseDriver):
 
     # ------------------------------------------------------------- capture
 
-    def capture(self, bbox, canvas_width, format="png", quality=85, grayscale=False):
-        return self.capture_with_dimensions(bbox, canvas_width, None, format, quality, grayscale)
+    def capture(self, bbox, canvas_width, format="png", quality=85, grayscale=False, grid=False):
+        return self.capture_with_dimensions(bbox, canvas_width, None, format, quality, grayscale, grid)
 
     def capture_with_dimensions(self, bbox, canvas_width, canvas_height, format="png",
-                                quality=85, grayscale=False):
+                                quality=85, grayscale=False, grid=False):
         left, top, right, bottom = bbox
         width = max(1, int(canvas_width))
         height = (max(1, int(round((bottom - top) * width / max(right - left, 1))))
                   if canvas_height is None else max(1, int(canvas_height)))
         self._record(kind="capture", bbox=(left, top, right, bottom),
                      canvas_width=width, format=format, quality=quality, grayscale=grayscale)
+        if grid:
+            import io
+            from PIL import Image
+            from computer_control.grid_render import draw_grid
+
+            image = Image.new("L" if grayscale else "RGB", (width, height), 128 if grayscale else (255, 0, 0))
+            image, _ = draw_grid(image)
+            buffer = io.BytesIO()
+            if format == "jpeg":
+                image.save(buffer, "JPEG", quality=quality)
+            else:
+                image.save(buffer, "PNG", optimize=False)
+            return CapturePayload(buffer.getvalue(), width, height, format)
         if format == "jpeg":
             return CapturePayload(_JPEG_1PX, width, height, "jpeg")
         return CapturePayload(_PNG_1PX, width, height, "png")
