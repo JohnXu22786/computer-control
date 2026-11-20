@@ -109,6 +109,34 @@ class TestCapture(unittest.TestCase):
         self.assertIn("does not intersect", result["error"]["message"])
         self.assertFalse(any(event["kind"] == "capture" for event in driver.log()))
 
+    def test_capture_bounds_full_desktop_with_negative_origin_and_area_limit(self):
+        engine, driver, _, _, _ = make_engine({"capture": {"max_area": 1024}})
+        engine._surface = Surface.from_physical(1920, -1920, -100, 3840, 1080)
+        result = engine.run_tool("screen.capture", {"scale": 0.5})
+        self.assertTrue(result["ok"], result)
+        self.assertLessEqual(result["result"]["width"] * result["result"]["height"], 1024)
+        self.assertEqual(engine._action_surface.physical_bbox, (-1920, -100, 1920, 980))
+        self.assertEqual([e for e in driver.log() if e["kind"] == "capture"][-1]["bbox"],
+                         engine._action_surface.physical_bbox)
+
+    def test_capture_bounds_clipping_rounding_and_failed_capture(self):
+        engine, driver, _, _, _ = make_engine()
+        engine._surface = Surface.from_physical(100, -150, -50, 150, 90)
+        result = engine.run_tool("screen.capture", {"scale": 0.5, "region": {
+            "x": 99, "y": 1, "width": 4, "height": 3}})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(engine._action_surface.physical_bbox, (-2, -49, 0, -44))
+        self.assertEqual([e for e in driver.log() if e["kind"] == "capture"][-1]["bbox"],
+                         engine._action_surface.physical_bbox)
+        click = engine.run_tool("pointer.click", {"x": 0, "y": 0})
+        self.assertTrue(click["ok"], click)
+        self.assertEqual([e for e in driver.log() if e["kind"] == "move"][-1]["position"],
+                         (-2.0, -49.0))
+        rejected = engine.run_tool("screen.capture", {"region": {
+            "x": 200, "y": 0, "width": 1, "height": 1}})
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(engine._action_surface.physical_bbox, (-2, -49, 0, -44))
+
     def test_capture_format_jpeg(self):
         engine, _, _, _, _ = make_engine()
         r = engine.run_tool("screen.capture", {"format": "jpeg"})
