@@ -85,14 +85,29 @@ function createClient(config, log) {
       const child = spawn(PYTHON, ['-m', 'computer_control', 'serve'], {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
+      let didSpawn = false;
       proc = child;
-      child.once('spawn', resolve);
-      child.once('error', reject);
+      child.once('spawn', () => {
+        didSpawn = true;
+        resolve();
+      });
       child.on('error', (err) => {
+        if (!didSpawn && proc === child) {
+          proc = null;
+          spawned = null;
+          sessionToken = null;
+          buffer = '';
+          reject(err);
+        }
         for (const waiter of pending.values()) waiter.reject(err);
         pending.clear();
       });
       child.on('exit', () => {
+        if (proc !== child) return;
+        proc = null;
+        spawned = null;
+        sessionToken = null;
+        buffer = '';
         for (const waiter of pending.values())
           waiter.reject(new Error('computer-control server exited; is `python -m computer_control serve` runnable?'));
         pending.clear();
@@ -186,13 +201,14 @@ function createClient(config, log) {
   }
 
   async function teardown() {
-    if (!proc) return;
+    const child = proc;
+    if (!child) return;
     try {
       await Promise.race([request('session.stop', {}), new Promise((r) => setTimeout(r, 2000))]);
     } catch {
       /* best effort */
     }
-    proc.kill();
+    child.kill();
   }
 
   let onEvent = null;

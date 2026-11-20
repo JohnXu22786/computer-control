@@ -6,15 +6,17 @@ classification, immutable config fields, standby/pending interaction,
 capture area caps and hotkey behavior from standby.
 """
 
+import http.client
 import json
 import threading
 import time
 import unittest
+from unittest import mock
 
 from computer_control.config import from_dict
 from computer_control.policy import SafetyGate, EmitRecorder
 from computer_control.protocol import Router
-from computer_control.server import EventRing, serve_stdio
+from computer_control.server import EventRing, make_http_server, serve_stdio
 from computer_control.drivers.dummy import NullDriver
 from computer_control.session import Session
 
@@ -29,6 +31,17 @@ class FakeReader:
         return self.lines.pop(0)
 
 
+class BlockingReader:
+    def __init__(self):
+        self.read_started = threading.Event()
+        self.finish = threading.Event()
+
+    def readline(self):
+        self.read_started.set()
+        self.finish.wait(3)
+        return b""
+
+
 class FakeWriter:
     def __init__(self):
         self.buffer = b""
@@ -39,6 +52,24 @@ class FakeWriter:
 
     def flush(self):
         pass
+
+
+class BufferedWriter:
+    """Expose writes only after flush, like buffered stdio output."""
+
+    def __init__(self):
+        self.pending = b""
+        self.buffer = b""
+        self.flush_count = 0
+
+    def write(self, data):
+        self.pending += data
+        return len(data)
+
+    def flush(self):
+        self.buffer += self.pending
+        self.pending = b""
+        self.flush_count += 1
 
 
 def wait_for(predicate, timeout=3.0, interval=0.02):
@@ -85,6 +116,28 @@ class TestEventWiring(unittest.TestCase):
         events = [l["params"]["type"] for l in lines if l.get("method") == "event"]
         self.assertIn("safety.confirmation_requested", events)
         self.assertNotIn("safety.panic_triggered", events)
+
+    def test_stdio_notification_flushes_buffered_output(self):
+        router = self._router()
+        reader = BlockingReader()
+        writer = BufferedWriter()
+        server_thread = threading.Thread(target=serve_stdio, args=(router, reader, writer))
+        server_thread.start()
+
+        try:
+            self.assertTrue(reader.read_started.wait(2))
+            router._event_sink("confirmation.timeout", {"id": "pending"})
+
+            self.assertEqual(writer.pending, b"")
+            self.assertEqual(writer.flush_count, 1)
+            notification = json.loads(writer.buffer.decode("utf-8"))
+            self.assertEqual(notification["method"], "event")
+            self.assertEqual(notification["params"]["type"], "confirmation.timeout")
+        finally:
+            reader.finish.set()
+            server_thread.join(timeout=2)
+
+        self.assertFalse(server_thread.is_alive())
 
 
 class TestNotificationSemantics(unittest.TestCase):
@@ -133,6 +186,47 @@ class TestEventRing(unittest.TestCase):
         for i in range(20):
             ring.publish("e%d" % i, None)
         self.assertEqual(len(ring.recent()), 5)
+
+
+class TestSSEReplayLiveBoundary(unittest.TestCase):
+    def test_live_event_with_replay_tail_timestamp_is_delivered(self):
+        router = Router(driver_factory=lambda cfg: NullDriver(enable_a11y=True))
+        server = make_http_server(router, "127.0.0.1", 0)
+        server_thread = threading.Thread(target=server.serve_forever)
+        server_thread.start()
+        connection = http.client.HTTPConnection(*server.server_address, timeout=2)
+
+        try:
+            with mock.patch("computer_control.server.time.time", return_value=123.0):
+                router._event_ring.publish("replay.tail", {"n": 1})
+
+            connection.request("GET", "/events")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+
+            def read_event():
+                lines = []
+                while True:
+                    line = response.readline().decode("utf-8").rstrip("\r\n")
+                    if not line:
+                        return lines
+                    lines.append(line)
+
+            replay = read_event()
+            self.assertTrue(any('"type": "replay.tail"' in line for line in replay))
+
+            with mock.patch("computer_control.server.time.time", return_value=123.0):
+                router._event_ring.publish("live.equal_timestamp", {"n": 2})
+
+            live = read_event()
+            self.assertTrue(any('"type": "live.equal_timestamp"' in line for line in live))
+        finally:
+            connection.close()
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
+
+        self.assertFalse(server_thread.is_alive())
 
 
 class TestManifestConsistency(unittest.TestCase):
@@ -217,11 +311,1045 @@ class TestImmutableConfig(unittest.TestCase):
                 self.session.configure(patch)
             self.assertEqual(ctx.exception.code, "invalid_config", patch)
 
+    def test_auth_profile_survives_unrelated_configure(self):
+        # session.configure round-trips the whole config; a profile that is
+        # dropped on the way back through as_dict/from_dict would silently
+        # widen the agent's own permissions.
+        session = Session(emit=lambda t, p=None: None,
+                          driver_factory=lambda cfg: NullDriver(enable_a11y=True),
+                          base_config={"safety": {"auth_profile": "read_only"}})
+        try:
+            session.start({})
+            self.assertTrue(session.configure({"safety": {"confirm_threshold": "moderate"}})["ok"])
+            r = session.call("pointer.click", {"button": "left"})
+            self.assertEqual((r.get("error") or {}).get("code"), "not_authorized")
+        finally:
+            session.stop()
+
     def test_rules_still_configurable(self):
         result = self.session.configure({"safety": {"rules": [{"match": {"tool": "pointer.click"}, "effect": "deny"}]}})
         self.assertTrue(result["ok"])
         r = self.session.call("pointer.click", {})
         self.assertEqual(r["error"]["code"], "policy_denied")
+
+
+class TestGrantChannel(unittest.TestCase):
+    """In-band narrowing vs the host-only widening channel."""
+
+    def make(self, base_config):
+        return Session(emit=lambda t, p=None: None,
+                       driver_factory=lambda cfg: NullDriver(enable_a11y=True),
+                       base_config=base_config)
+
+    def test_pending_host_snapshot_overrides_start_narrowing_and_sets_floor(self):
+        session = self.make({"safety": {"auth_profile": "full"}})
+        try:
+            result = session.start(
+                {"safety": {"auth_profile": "read_only"}},
+                host_directive={"auth_profile": "full", "a11y_snapshot": False},
+            )
+            self.assertEqual(result["result"]["auth_profile"], "full")
+            self.assertEqual(session._profile_floor, "full")
+            self.assertTrue(session.call("pointer.click", {})["ok"])
+        finally:
+            session.stop()
+
+    def test_agent_may_narrow_but_not_widen(self):
+        from computer_control.session import SessionError
+
+        session = self.make({"safety": {"auth_profile": "full"}})
+        try:
+            session.start({})
+            self.assertTrue(session.configure({"safety": {"auth_profile": "read_only"}})["ok"])
+            self.assertEqual((session.call("pointer.click", {}).get("error") or {}).get("code"),
+                             "not_authorized")
+            with self.assertRaises(SessionError) as ctx:
+                session.configure({"safety": {"auth_profile": "full"}})
+            self.assertEqual(ctx.exception.code, "invalid_config")
+            # the rejected widening left the narrowing in place
+            self.assertEqual((session.call("pointer.click", {}).get("error") or {}).get("code"),
+                             "not_authorized")
+            self.assertEqual(session.state, "ready")
+        finally:
+            session.stop()
+
+    def test_downgrade_callback_restart_keeps_profile_floor(self):
+        reentered_profiles = []
+        session = None
+
+        def emit(event, payload=None):
+            if (event == "safety.confirmation_resolved"
+                    and payload.get("reason") == "cancelled by authorization downgrade"):
+                session.stop()
+                session.start({})
+                reentered_profiles.append(session._cfg.safety.auth_profile)
+
+        session = Session(emit=emit,
+                          driver_factory=lambda cfg: NullDriver(enable_a11y=True),
+                          base_config={"safety": {"auth_profile": "full"}})
+        try:
+            session.start({"safety": {"confirm_threshold": "high"}})
+            requested = session.call("keyboard.combo", {"keys": ["win", "r"]})
+            self.assertTrue(requested["ok"], requested)
+            self.assertEqual(requested["result"]["status"], "awaiting_confirmation")
+
+            session.configure({"safety": {"auth_profile": "limited"}})
+
+            self.assertEqual(reentered_profiles, ["limited"])
+            restarted_action = session.call("keyboard.combo", {"keys": ["win", "r"]})
+            self.assertEqual((restarted_action.get("error") or {}).get("code"),
+                             "not_authorized")
+        finally:
+            if session.started:
+                session.stop()
+
+    def test_revoked_is_a_one_way_door_in_band(self):
+        from computer_control.session import SessionError
+
+        session = self.make({"safety": {"auth_profile": "limited"}})
+        try:
+            session.start({})
+            self.assertTrue(session.configure({"safety": {"auth_profile": "read_only"}})["ok"])
+            self.assertTrue(session.configure({"safety": {"auth_profile": "revoked"}})["ok"])
+            with self.assertRaises(SessionError):
+                session.configure({"safety": {"auth_profile": "read_only"}})
+            self.assertTrue(session.call("screen.capture", {})["ok"])
+            self.assertEqual(session.state, "ready")
+        finally:
+            session.stop()
+
+    def test_host_grant_profile_widens(self):
+        session = self.make({"safety": {"auth_profile": "read_only"}})
+        try:
+            session.start({})
+            self.assertEqual((session.call("pointer.click", {}).get("error") or {}).get("code"),
+                             "not_authorized")
+            result = session.grant_profile("full")
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["result"]["auth_profile"], "full")
+            self.assertTrue(session.call("pointer.click", {})["ok"])
+        finally:
+            session.stop()
+
+    def test_grant_profile_is_not_routable(self):
+        from computer_control.protocol import METHOD_NOT_FOUND
+
+        router = Router(lambda: self.make({"safety": {"auth_profile": "read_only"}}))
+        router.handle({"jsonrpc": "2.0", "id": 1, "method": "session.start", "params": {}})
+        for method in ("session.grant_profile", "control.grant_profile", "grant_profile"):
+            response = router.handle({"jsonrpc": "2.0", "id": 2, "method": method,
+                                      "params": {"profile": "full"}})
+            self.assertEqual(METHOD_NOT_FOUND, response["error"]["code"], method)
+        # the in-band route cannot widen either
+        response = router.handle({"jsonrpc": "2.0", "id": 3, "method": "session.configure",
+                                  "params": {"patch": {"safety": {"auth_profile": "full"}}}})
+        self.assertFalse(response["result"]["ok"])
+        self.assertEqual("invalid_config", response["result"]["error"]["code"])
+
+    def test_revoked_session_keeps_observation(self):
+        session = self.make({"safety": {"auth_profile": "revoked"}})
+        try:
+            session.start({})
+            self.assertTrue(session.call("screen.capture", {})["ok"])
+            # a11y.snapshot sits on the observation floor only with the
+            # host's explicit opt-in; revoked defaults to refusing it too
+            r = session.call("a11y.snapshot", {})
+            self.assertEqual((r.get("error") or {}).get("code"), "not_authorized")
+            for tool, args in (("keyboard.type", {"text": "hi"}),
+                               ("wait.pause", {"ms": 1}),
+                               ("batch.execute", {"items": [{"tool": "pointer.click"}]})):
+                result = session.call(tool, args)
+                self.assertEqual((result.get("error") or {}).get("code"), "not_authorized", tool)
+            self.assertEqual(session.state, "ready")
+            self.assertEqual(session.status()["result"]["state"], "ready")
+        finally:
+            session.stop()
+
+    def test_revoked_session_a11y_snapshot_with_host_opt_in(self):
+        # The opt-in is a host-only safety key: it comes from the host's own
+        # config file (or the control channel), never from an in-band patch.
+        session = self.make({"safety": {"auth_profile": "revoked",
+                                        "a11y_snapshot_opt_in": True}})
+        try:
+            session.start({})
+            self.assertTrue(session.call("a11y.snapshot", {})["ok"])
+            # opting into observation does not un-revoke anything else
+            self.assertEqual((session.call("keyboard.type", {"text": "hi"}).get("error") or {})
+                             .get("code"), "not_authorized")
+        finally:
+            session.stop()
+
+    def test_host_only_safety_keys_rejected_in_band(self):
+        from computer_control.session import SessionError
+
+        # session.start config
+        session = self.make({"safety": {"auth_profile": "read_only"}})
+        with self.assertRaises(SessionError) as ctx:
+            session.start({"safety": {"a11y_snapshot_opt_in": True}})
+        self.assertEqual(ctx.exception.code, "invalid_config")
+        self.assertIsNone(session._gate)
+        # session.configure patch
+        session.start({})
+        try:
+            with self.assertRaises(SessionError) as ctx:
+                session.configure({"safety": {"a11y_snapshot_opt_in": True}})
+            self.assertEqual(ctx.exception.code, "invalid_config")
+            # and over the router as well
+            from computer_control.protocol import Router
+            router = Router(lambda: session)
+            response = router.handle({"jsonrpc": "2.0", "id": 1, "method": "session.configure",
+                                      "params": {"patch": {"safety": {"a11y_snapshot_opt_in": True}}}})
+            self.assertEqual("invalid_config", response["result"]["error"]["code"])
+        finally:
+            session.stop()
+
+    def test_apply_host_directive_flips_opt_in_and_profile(self):
+        session = self.make({"safety": {"auth_profile": "read_only"}})
+        try:
+            session.start({})
+            # a11y.snapshot is off under read_only by default
+            self.assertEqual((session.call("a11y.snapshot", {}).get("error") or {}).get("code"),
+                             "not_authorized")
+            result = session.apply_host_directive({"a11y_snapshot": True})
+            self.assertTrue(result["ok"])
+            self.assertTrue(session.call("a11y.snapshot", {})["ok"])
+            # the same directive path can widen the profile
+            result = session.apply_host_directive({"auth_profile": "full"})
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["result"]["auth_profile"], "full")
+            self.assertTrue(session.call("pointer.click", {})["ok"])
+        finally:
+            session.stop()
+
+    def test_host_a11y_opt_out_survives_session_restart(self):
+        session = self.make({"safety": {"auth_profile": "read_only",
+                                        "a11y_snapshot_opt_in": True}})
+        try:
+            session.start({})
+            self.assertTrue(session.call("a11y.snapshot", {})["ok"])
+            session.apply_host_directive({"a11y_snapshot": False})
+            self.assertEqual((session.call("a11y.snapshot", {}).get("error") or {}).get("code"),
+                             "not_authorized")
+
+            session.stop()
+            session.start({})
+            self.assertEqual((session.call("a11y.snapshot", {}).get("error") or {}).get("code"),
+                             "not_authorized")
+
+            session.apply_host_directive({"a11y_snapshot": True})
+            self.assertTrue(session.call("a11y.snapshot", {})["ok"])
+        finally:
+            session.stop()
+
+
+    def test_host_a11y_opt_out_cancels_pending_snapshot_confirmation(self):
+        emit = EmitRecorder()
+        session = Session(emit=emit,
+                          driver_factory=lambda cfg: NullDriver(enable_a11y=True),
+                          base_config={"safety": {"auth_profile": "read_only",
+                                                  "a11y_snapshot_opt_in": True}})
+        try:
+            session.start({"safety": {"confirm_threshold": "benign"}})
+            result = session.call("a11y.snapshot", {})
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+            request_id = result["result"]["request_id"]
+
+            self.assertTrue(session.apply_host_directive({"a11y_snapshot": False})["ok"])
+
+            self.assertIsNone(session.status()["result"]["pending_confirmation"])
+            resolved = [payload for event, payload in emit.dump()
+                        if event == "safety.confirmation_resolved"]
+            self.assertEqual(len(resolved), 1)
+            self.assertEqual(resolved[0]["request_id"], request_id)
+            self.assertFalse(resolved[0]["approve"])
+            self.assertEqual(resolved[0]["reason"], "cancelled by authorization downgrade")
+
+            confirmation = session.confirm(request_id, approve=True)
+            self.assertFalse(confirmation["ok"])
+            self.assertEqual(confirmation["error"]["code"], "confirmation_not_found")
+            follow_up = session.call("pointer.click", {})
+            self.assertEqual(follow_up["error"]["code"], "not_authorized")
+            self.assertEqual(session.state, "ready")
+        finally:
+            session.stop()
+
+
+    def test_host_a11y_opt_out_preserves_other_allowed_pending_confirmation(self):
+        emit = EmitRecorder()
+        session = Session(emit=emit,
+                          driver_factory=lambda cfg: NullDriver(enable_a11y=True),
+                          base_config={"safety": {"auth_profile": "revoked",
+                                                  "a11y_snapshot_opt_in": True}})
+        try:
+            session.start({"safety": {"confirm_threshold": "benign"}})
+            result = session.call("screen.capture", {})
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+            request_id = result["result"]["request_id"]
+
+            self.assertTrue(session.apply_host_directive({"a11y_snapshot": False})["ok"])
+
+            pending = session.status()["result"]["pending_confirmation"]
+            self.assertEqual(pending["request_id"], request_id)
+            confirmation = session.confirm(request_id, approve=False)
+            self.assertTrue(confirmation["ok"], confirmation)
+            self.assertEqual(confirmation["result"]["status"], "denied")
+        finally:
+            session.stop()
+
+
+    def test_restart_over_rpc_cannot_widen(self):
+        # stop+start is in-band too: the host's config file caps what a restarted
+        # session may ask for.
+        router = Router(lambda: self.make({"safety": {"auth_profile": "read_only"}}))
+        router.handle({"jsonrpc": "2.0", "id": 1, "method": "session.start", "params": {}})
+        router.handle({"jsonrpc": "2.0", "id": 2, "method": "session.stop", "params": {}})
+        response = router.handle({"jsonrpc": "2.0", "id": 3, "method": "session.start",
+                                  "params": {"config": {"safety": {"auth_profile": "full"}}}})
+        self.assertFalse(response["result"]["ok"])
+        self.assertEqual("invalid_config", response["result"]["error"]["code"])
+        # the refused restart must not leave a widened session behind
+        router.handle({"jsonrpc": "2.0", "id": 4, "method": "session.start", "params": {}})
+        response = router.handle({"jsonrpc": "2.0", "id": 5, "method": "tools.call",
+                                  "params": {"tool": "pointer.click", "arguments": {}}})
+        self.assertEqual("not_authorized", response["result"]["error"]["code"])
+
+    def test_host_grant_does_not_survive_restart(self):
+        # A runtime grant is per-session; coming back up falls to the host's cap.
+        session = self.make({"safety": {"auth_profile": "read_only"}})
+        try:
+            session.start({})
+            self.assertTrue(session.grant_profile("full")["ok"])
+            self.assertTrue(session.call("pointer.click", {})["ok"])
+        finally:
+            session.stop()
+        try:
+            session.start({})
+            self.assertEqual((session.call("pointer.click", {}).get("error") or {}).get("code"),
+                             "not_authorized")
+        finally:
+            session.stop()
+
+    def test_restart_without_profile_cannot_regain_base_authority(self):
+        # downgrade -> stop -> start without auth_profile: the session must
+        # come back up at the narrowed profile, not silently reload the wider
+        # profile from the host's own config file.
+        session = self.make({"safety": {"auth_profile": "full"}})
+        try:
+            session.start({})
+            self.assertTrue(session.configure({"safety": {"auth_profile": "read_only"}})["ok"])
+            self.assertEqual((session.call("pointer.click", {}).get("error") or {}).get("code"),
+                             "not_authorized")
+        finally:
+            session.stop()
+        try:
+            r = session.start({})
+            self.assertTrue(r["ok"])
+            self.assertEqual(r["result"]["auth_profile"], "read_only")
+            result = session.call("pointer.click", {})
+            self.assertEqual(result["error"]["code"], "not_authorized")
+            self.assertEqual(result["error"]["data"]["auth_profile"], "read_only")
+            # the host's explicit grant is the way back up
+            self.assertTrue(session.grant_profile("full")["ok"])
+            self.assertTrue(session.call("pointer.click", {})["ok"])
+        finally:
+            session.stop()
+
+    def test_restart_explicit_profile_wider_than_floor_rejected(self):
+        # an explicit start profile that widens vs the sticky floor is
+        # rejected even when it does not widen vs the host's config file
+        from computer_control.session import SessionError
+
+        session = self.make({"safety": {"auth_profile": "full"}})
+        try:
+            session.start({})
+            self.assertTrue(session.configure({"safety": {"auth_profile": "read_only"}})["ok"])
+        finally:
+            session.stop()
+        with self.assertRaises(SessionError) as ctx:
+            session.start({"safety": {"auth_profile": "limited"}})
+        self.assertEqual(ctx.exception.code, "invalid_config")
+        try:
+            session.start({})
+            self.assertEqual((session.call("pointer.click", {}).get("error") or {}).get("code"),
+                             "not_authorized")
+        finally:
+            session.stop()
+
+    def test_host_grant_lifts_the_restart_cap(self):
+        # the host explicitly granted after the narrowing, so a later restart
+        # is no longer capped at the narrowed profile
+        session = self.make({"safety": {"auth_profile": "full"}})
+        try:
+            session.start({})
+            self.assertTrue(session.configure({"safety": {"auth_profile": "read_only"}})["ok"])
+            self.assertTrue(session.grant_profile("full")["ok"])
+        finally:
+            session.stop()
+        try:
+            r = session.start({})
+            self.assertTrue(r["ok"])
+            self.assertEqual(r["result"]["auth_profile"], "full")
+            self.assertTrue(session.call("pointer.click", {})["ok"])
+        finally:
+            session.stop()
+
+
+class TestApprovalDowngradeRace(unittest.TestCase):
+    """Round-3: an approval collected while the action was still legal must
+    not execute after the authorization profile narrowed, including through
+    the real session worker queue."""
+
+    def test_allowed_pending_batch_survives_profile_downgrade(self):
+        emit = EmitRecorder()
+        driver = NullDriver(enable_a11y=True)
+        session = Session(emit=emit, driver_factory=lambda cfg: driver,
+                          base_config={"safety": {"auth_profile": "full"}})
+        try:
+            session.start({"safety": {"confirm_threshold": "moderate"}})
+            result = session.call("batch.execute", {"items": [{
+                "tool": "pointer.drag",
+                "arguments": {"from": {"x": 1, "y": 1}, "to": {"x": 2, "y": 2}},
+            }]})
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+            request_id = result["result"]["request_id"]
+
+            self.assertTrue(session.configure({"safety": {"auth_profile": "limited"}})["ok"])
+            pending = session.status()["result"]["pending_confirmation"]
+            self.assertEqual(pending["request_id"], request_id)
+            self.assertTrue(session.confirm(request_id, approve=True)["ok"])
+            self.assertTrue(wait_for(lambda: "batch.finished" in emit.types()))
+            self.assertEqual([entry["kind"] for entry in driver.log()], ["drag"])
+        finally:
+            session.stop()
+
+    def test_nested_batch_confirmation_cancelled_on_profile_downgrade(self):
+        from computer_control.actions import MAX_BATCH_NESTING
+
+        emit = EmitRecorder()
+        driver = NullDriver(enable_a11y=True)
+        session = Session(emit=emit, driver_factory=lambda cfg: driver,
+                          base_config={"safety": {"auth_profile": "full"}})
+        try:
+            session.start({"safety": {"confirm_threshold": "moderate"}})
+            items = [
+                {"tool": "pointer.click", "arguments": {}},
+                {"tool": "keyboard.press", "arguments": {"key": "a"}},
+            ]
+            for _ in range(MAX_BATCH_NESTING - 1):
+                items = [{"tool": "batch.execute", "arguments": {"items": items}}]
+
+            result = session.call("batch.execute", {"items": items})
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+            request_id = result["result"]["request_id"]
+
+            self.assertTrue(session.configure({"safety": {"auth_profile": "limited"}})["ok"])
+            resolved = [payload for event, payload in emit.dump()
+                        if event == "safety.confirmation_resolved"]
+            self.assertEqual(len(resolved), 1)
+            self.assertFalse(resolved[0]["approve"])
+            self.assertEqual(resolved[0]["reason"], "cancelled by authorization downgrade")
+
+            confirmation = session.confirm(request_id, approve=True)
+            self.assertFalse(confirmation["ok"])
+            self.assertEqual(confirmation["error"]["code"], "confirmation_not_found")
+            self.assertEqual(driver.log(), [])
+        finally:
+            session.stop()
+
+    def test_nested_batch_confirmation_emits_outside_admission_guard(self):
+        emit = EmitRecorder()
+        session = Session(emit=emit,
+                          driver_factory=lambda cfg: NullDriver(enable_a11y=True),
+                          base_config={"safety": {"auth_profile": "full"}})
+        config_waiting_for_admission = threading.Event()
+        change_finished = threading.Event()
+        inversion_observed = threading.Event()
+        publish_lock_states = []
+        callback_lock_states = []
+        pending_payload_states = []
+        response_request_ids = []
+        inline_approvals = []
+        change_threads = []
+        change_results = []
+        try:
+            session.start({"safety": {"confirm_threshold": "moderate"}})
+            result = session.call("batch.execute", {"items": [{
+                "tool": "batch.execute",
+                "arguments": {"items": [{
+                    "tool": "pointer.drag",
+                    "arguments": {"from": {"x": 1, "y": 1}, "to": {"x": 2, "y": 2}},
+                }]},
+            }]})
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+            outer_request_id = result["result"]["request_id"]
+
+            gate = session._gate
+            original_emit = gate._emit
+            original_reconfigure = gate.reconfigure
+            original_build_response = gate.build_confirmation_response
+            original_callback = gate.on_approved
+
+            def record_built_response(request_id, build_response):
+                response = original_build_response(request_id, build_response)
+                if response is not None:
+                    response_request_ids.append(request_id)
+                return response
+
+            gate.build_confirmation_response = record_built_response
+
+            def check_callback_locks(pending):
+                if pending.request_id != outer_request_id:
+                    callback_lock_states.append((gate._lock._is_owned(),
+                                                 gate._admission_lock._is_owned()))
+                original_callback(pending)
+
+            gate.on_approved = check_callback_locks
+
+            def bounded_reconfigure(cfg):
+                config_waiting_for_admission.set()
+                if not gate._admission_lock.acquire(timeout=0.5):
+                    inversion_observed.set()
+                    return
+                try:
+                    original_reconfigure(cfg)
+                finally:
+                    gate._admission_lock.release()
+
+            gate.reconfigure = bounded_reconfigure
+
+            def change_grant_concurrently():
+                try:
+                    change_results.append(session.configure({
+                        "safety": {"auth_profile": "limited"},
+                    }))
+                finally:
+                    change_finished.set()
+
+            def emit_and_approve_inline(event, payload):
+                original_emit(event, payload)
+                if (event != "safety.confirmation_requested"
+                        or payload["request_id"] == outer_request_id):
+                    return
+
+                publish_lock_states.append((gate._lock._is_owned(),
+                                            gate._admission_lock._is_owned()))
+                pending = gate.pending_confirmation()
+                self.assertIsNotNone(pending)
+                pending_payload_states.append(pending.payload is not None)
+                self.assertIn(payload["request_id"], response_request_ids)
+
+                change_thread = threading.Thread(target=change_grant_concurrently,
+                                                 daemon=True)
+                change_threads.append(change_thread)
+                change_thread.start()
+                self.assertTrue(config_waiting_for_admission.wait(timeout=2))
+
+                inline_approvals.append(session.confirm(
+                    payload["request_id"], approve=True))
+
+            gate._emit = emit_and_approve_inline
+            self.assertTrue(session.confirm(outer_request_id, approve=True)["ok"])
+
+            self.assertTrue(wait_for(lambda: bool(inline_approvals)))
+            self.assertTrue(change_finished.wait(timeout=2))
+            self.assertEqual(len(change_results), 1)
+            self.assertTrue(change_results[0]["ok"], change_results[0])
+            self.assertEqual(change_results[0]["result"]["auth_profile"], "limited")
+            for change_thread in change_threads:
+                change_thread.join(timeout=1)
+
+            nested_request_ids = [
+                payload["request_id"] for event, payload in emit.dump()
+                if event == "safety.confirmation_requested"
+                and payload["request_id"] != outer_request_id
+            ]
+            self.assertEqual(len(nested_request_ids), 1)
+            nested_request_id = nested_request_ids[0]
+            self.assertEqual(len(inline_approvals), 1)
+            self.assertTrue(inline_approvals[0]["ok"], inline_approvals[0])
+            self.assertEqual(inline_approvals[0]["result"]["status"], "approved")
+            resolved = [payload for event, payload in emit.dump()
+                        if event == "safety.confirmation_resolved"
+                        and payload["request_id"] == nested_request_id]
+            self.assertEqual(len(resolved), 1)
+            nested_events = [event for event, payload in emit.dump()
+                             if payload and payload.get("request_id") == nested_request_id]
+            self.assertEqual(nested_events, ["safety.confirmation_requested",
+                                             "safety.confirmation_resolved"])
+            self.assertEqual(publish_lock_states, [(False, False)])
+            self.assertEqual(callback_lock_states, [(False, False)])
+            self.assertEqual(pending_payload_states, [True])
+            self.assertFalse(inversion_observed.is_set())
+        finally:
+            session.stop()
+
+    def test_nested_batch_cancellation_before_response_emits_no_orphan_event(self):
+        emit = EmitRecorder()
+        session = Session(emit=emit,
+                          driver_factory=lambda cfg: NullDriver(enable_a11y=True),
+                          base_config={"safety": {"auth_profile": "full"}})
+        evaluated = threading.Event()
+        continue_evaluation = threading.Event()
+        nested_request_ids = []
+        try:
+            session.start({"safety": {"confirm_threshold": "moderate"}})
+            result = session.call("batch.execute", {"items": [{
+                "tool": "batch.execute",
+                "arguments": {"items": [{
+                    "tool": "pointer.drag",
+                    "arguments": {"from": {"x": 1, "y": 1}, "to": {"x": 2, "y": 2}},
+                }]},
+            }]})
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+
+            gate = session._gate
+            original_evaluate = gate.evaluate
+
+            def pause_after_nested_evaluate(tool, arguments, **kwargs):
+                verdict = original_evaluate(tool, arguments, **kwargs)
+                if tool == "batch.execute" and kwargs.get("defer_confirmation_event"):
+                    nested_request_ids.append(verdict.data["request_id"])
+                    evaluated.set()
+                    if not continue_evaluation.wait(timeout=3):
+                        raise AssertionError("nested evaluation was never released")
+                return verdict
+
+            gate.evaluate = pause_after_nested_evaluate
+            self.assertTrue(session.confirm(result["result"]["request_id"], approve=True)["ok"])
+            self.assertTrue(evaluated.wait(timeout=2))
+
+            pending = gate.pending_confirmation()
+            self.assertIsNotNone(pending)
+            gate.suspend()
+            continue_evaluation.set()
+            self.assertTrue(wait_for(lambda: "batch.finished" in emit.types()))
+
+            request_id = nested_request_ids[0]
+            requested = [payload for event, payload in emit.dump()
+                         if event == "safety.confirmation_requested"
+                         and payload["request_id"] == request_id]
+            resolved = [payload for event, payload in emit.dump()
+                        if event == "safety.confirmation_resolved"
+                        and payload["request_id"] == request_id]
+            self.assertEqual(requested, [])
+            self.assertEqual(resolved, [])
+            self.assertEqual(pending.request_event_state, "deferred")
+        finally:
+            continue_evaluation.set()
+            session.stop()
+
+    def test_confirmation_cancelled_before_run_tool_response(self):
+        cases = (
+            ("keyboard.combo", {"keys": ["win", "r"]}),
+            ("batch.execute", {"items": [{
+                "tool": "pointer.click", "arguments": {"x": 1, "y": 1},
+            }]}),
+        )
+        for tool, arguments in cases:
+            with self.subTest(tool=tool):
+                emit = EmitRecorder()
+                driver = NullDriver(enable_a11y=True)
+                session = Session(emit=emit, driver_factory=lambda cfg: driver,
+                                  base_config={"safety": {"auth_profile": "full"}})
+                try:
+                    session.start({"safety": {"confirm_threshold": "moderate"}})
+                    gate = session._gate
+                    original_build_response = gate.build_confirmation_response
+
+                    def downgrade_then_build_response(request_id, build_response):
+                        self.assertTrue(session.configure({
+                            "safety": {"auth_profile": "read_only"},
+                        })["ok"])
+                        return original_build_response(request_id, build_response)
+
+                    with mock.patch.object(gate, "build_confirmation_response",
+                                           side_effect=downgrade_then_build_response):
+                        result = session.call(tool, arguments)
+
+                    self.assertFalse(result["ok"], result)
+                    self.assertEqual(result["error"]["code"], "confirmation_not_pending")
+                    self.assertIsNone(gate.pending_confirmation())
+                    resolved = [payload for event, payload in emit.dump()
+                                if event == "safety.confirmation_resolved"]
+                    self.assertEqual(len(resolved), 1)
+                    self.assertFalse(resolved[0]["approve"])
+                    self.assertEqual(resolved[0]["reason"],
+                                     "cancelled by authorization downgrade")
+                finally:
+                    session.stop()
+
+    def test_approval_from_event_waits_for_run_tool_response(self):
+        emit = EmitRecorder()
+        driver = NullDriver(enable_a11y=True)
+        session = Session(emit=emit, driver_factory=lambda cfg: driver,
+                          base_config={"safety": {"auth_profile": "full"}})
+        results = {}
+        try:
+            session.start({"safety": {"confirm_threshold": "moderate"}})
+            gate = session._gate
+            original_callback = gate.on_approved
+
+            def check_callback_locks(pending):
+                self.assertFalse(gate._lock._is_owned())
+                self.assertFalse(gate._admission_lock._is_owned())
+                original_callback(pending)
+
+            gate.on_approved = check_callback_locks
+
+            def emit_and_approve(event, payload):
+                emit(event, payload)
+                if event == "safety.confirmation_requested":
+                    results["approval"] = session.confirm(payload["request_id"], approve=True)
+
+            gate._emit = emit_and_approve
+            result = session.call("keyboard.combo", {"keys": ["win", "r"]})
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+            self.assertIn("safety.confirmation_requested", emit.types())
+            self.assertTrue(results["approval"]["ok"], results["approval"])
+            self.assertEqual(results["approval"]["result"]["status"], "approved")
+            self.assertTrue(wait_for(lambda: "action.finished" in emit.types()))
+            self.assertIn("combo", [entry["kind"] for entry in driver.log()])
+        finally:
+            session.stop()
+
+    def test_approved_action_refused_when_downgraded_before_execution(self):
+        emit = EmitRecorder()
+        driver = NullDriver(enable_a11y=True)
+        session = Session(emit=emit, driver_factory=lambda cfg: driver,
+                          base_config={"safety": {"auth_profile": "full"}})
+        release = threading.Event()
+        release2 = threading.Event()
+        second_blocker_started = threading.Event()
+        try:
+            session.start({"safety": {"confirm_threshold": "moderate"}})
+            # hold the worker so the combo call queues behind a blocker
+            session._worker_queue.put((release.wait, threading.Event(), {"result": None}))
+            results = {}
+
+            def submit():
+                results["call"] = session.call("keyboard.combo", {"keys": ["win", "r"]})
+
+            thread = threading.Thread(target=submit)
+            thread.start()
+            release.set()  # worker: blocker done -> combo evaluates -> awaiting_confirmation
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            rid = results["call"]["result"]["request_id"]
+            # block the worker again, approve, then downgrade while the
+            # approved action is still queued
+            def block_second_action():
+                second_blocker_started.set()
+                return release2.wait()
+
+            session._worker_queue.put((block_second_action, threading.Event(), {"result": None}))
+            self.assertTrue(second_blocker_started.wait(timeout=5))
+            self.assertTrue(session.confirm(rid, approve=True)["ok"])
+            self.assertTrue(session.configure({"safety": {"auth_profile": "read_only"}})["ok"])
+            release2.set()
+            self.assertTrue(wait_for(lambda: "action.finished" in emit.types()))
+            self.assertEqual([e for e in driver.log() if e["kind"] == "combo"], [])
+            finished = [p for t, p in emit.dump() if t == "action.finished"]
+            self.assertEqual([p.get("error_code") for p in finished], ["not_authorized"])
+        finally:
+            release.set()
+            release2.set()
+            try:
+                session.stop()
+            except Exception:
+                pass
+
+
+class TestSynchronousEventLockCycle(unittest.TestCase):
+    def test_confirmation_request_timeout_is_snapshotted_before_publication(self):
+        emit = EmitRecorder()
+        session = Session(emit=emit,
+                          driver_factory=lambda cfg: NullDriver(enable_a11y=True),
+                          base_config={"safety": {"auth_profile": "full"}})
+        pending_times = []
+        configure_results = []
+        try:
+            session.start({"safety": {
+                "confirm_threshold": "moderate",
+                "confirm_timeout_s": 30,
+            }})
+            gate = session._gate
+            original_build_response = gate.build_confirmation_response
+
+            def reconfigure_timeout_then_build(request_id, build_response):
+                response = original_build_response(request_id, build_response)
+                pending = gate.pending_confirmation()
+                pending_times.append((pending.created_at, pending.expires_at))
+                configure_results.append(session.configure({
+                    "safety": {"confirm_timeout_s": 60},
+                }))
+                return response
+
+            with mock.patch.object(gate, "build_confirmation_response",
+                                   side_effect=reconfigure_timeout_then_build):
+                result = session.call("keyboard.combo", {"keys": ["win", "r"]})
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["result"]["status"], "awaiting_confirmation")
+            self.assertTrue(configure_results[0]["ok"], configure_results[0])
+            request = next(payload for event, payload in emit.dump()
+                           if event == "safety.confirmation_requested")
+            self.assertEqual(request["timeout_s"], 30)
+            self.assertAlmostEqual(pending_times[0][1] - pending_times[0][0],
+                                   30, delta=0.01)
+        finally:
+            session.stop()
+
+    def test_confirmation_resolved_callback_can_configure_and_confirm_inline(self):
+        emit = EmitRecorder()
+        session = Session(emit=emit,
+                          driver_factory=lambda cfg: NullDriver(enable_a11y=True),
+                          base_config={"safety": {"auth_profile": "full"}})
+        config_at_reconfigure = threading.Event()
+        configure_finished = threading.Event()
+        confirm_finished = threading.Event()
+        callback_lock_states = []
+        configure_results = []
+        inline_results = []
+        try:
+            session.start({"safety": {"confirm_threshold": "moderate"}})
+            requested = session.call("keyboard.combo", {"keys": ["win", "r"]})
+            self.assertTrue(requested["ok"], requested)
+            request_id = requested["result"]["request_id"]
+
+            gate = session._gate
+            original_reconfigure = gate.reconfigure
+            original_gate_emit = gate._emit
+
+            def observed_reconfigure(cfg):
+                config_at_reconfigure.set()
+                original_reconfigure(cfg)
+
+            gate.reconfigure = observed_reconfigure
+
+            def configure():
+                try:
+                    configure_results.append(session.configure({
+                        "safety": {"auth_profile": "limited"},
+                    }))
+                finally:
+                    configure_finished.set()
+
+            def resolve_and_reenter(event, payload):
+                original_gate_emit(event, payload)
+                if (event != "safety.confirmation_resolved"
+                        or payload.get("request_id") != request_id):
+                    return
+                callback_lock_states.append(gate._admission_lock._is_owned())
+                config_thread = threading.Thread(target=configure, daemon=True)
+                config_thread.start()
+                config_at_reconfigure.wait(timeout=2)
+                inline_results.append(session.confirm("inline-probe", approve=False))
+
+            gate._emit = resolve_and_reenter
+            results = {}
+
+            def deny_confirmation():
+                try:
+                    results["confirm"] = session.confirm(request_id, approve=False)
+                finally:
+                    confirm_finished.set()
+
+            confirm_thread = threading.Thread(target=deny_confirmation, daemon=True)
+            confirm_thread.start()
+            self.assertTrue(confirm_finished.wait(timeout=3),
+                            "confirmation-resolved callback deadlocked with configure/confirm")
+            self.assertTrue(configure_finished.wait(timeout=2))
+            confirm_thread.join(timeout=1)
+
+            self.assertEqual(callback_lock_states, [False])
+            self.assertTrue(results["confirm"]["ok"], results["confirm"])
+            self.assertEqual(results["confirm"]["result"]["status"], "denied")
+            self.assertEqual(len(configure_results), 1)
+            self.assertTrue(configure_results[0]["ok"], configure_results[0])
+            self.assertEqual(len(inline_results), 1)
+            self.assertFalse(inline_results[0]["ok"])
+            self.assertEqual(inline_results[0]["error"]["code"], "confirmation_not_found")
+            resolved = [payload for event, payload in emit.dump()
+                        if event == "safety.confirmation_resolved"
+                        and payload.get("request_id") == request_id]
+            self.assertEqual(len(resolved), 1)
+        finally:
+            if confirm_finished.is_set() and configure_finished.is_set():
+                session.stop()
+
+    def test_confirmation_request_callback_can_configure_and_confirm_inline(self):
+        emit = EmitRecorder()
+        driver = NullDriver(enable_a11y=True)
+        session = Session(emit=emit, driver_factory=lambda cfg: driver,
+                          base_config={"safety": {"auth_profile": "full"}})
+        config_at_reconfigure = threading.Event()
+        configure_finished = threading.Event()
+        call_finished = threading.Event()
+        callback_lock_states = []
+        inline_results = []
+        configure_results = []
+        request_threads = []
+        try:
+            session.start({"safety": {"confirm_threshold": "moderate"}})
+            gate = session._gate
+            original_reconfigure = gate.reconfigure
+            original_gate_emit = gate._emit
+
+            def observed_reconfigure(cfg):
+                config_at_reconfigure.set()
+                original_reconfigure(cfg)
+
+            gate.reconfigure = observed_reconfigure
+
+            def configure():
+                try:
+                    configure_results.append(session.configure({
+                        "safety": {"auth_profile": "limited"},
+                    }))
+                finally:
+                    configure_finished.set()
+
+            def publish_and_reenter(event, payload):
+                original_gate_emit(event, payload)
+                if event != "safety.confirmation_requested":
+                    return
+                callback_lock_states.append(gate._admission_lock._is_owned())
+                thread = threading.Thread(target=configure, daemon=True)
+                request_threads.append(thread)
+                thread.start()
+                config_at_reconfigure.wait(timeout=2)
+                inline_results.append(session.confirm(payload["request_id"], approve=False))
+
+            gate._emit = publish_and_reenter
+            results = {}
+
+            def submit():
+                try:
+                    results["call"] = session.call(
+                        "keyboard.combo", {"keys": ["win", "r"]})
+                finally:
+                    call_finished.set()
+
+            call_thread = threading.Thread(target=submit, daemon=True)
+            call_thread.start()
+            self.assertTrue(call_finished.wait(timeout=3),
+                            "confirmation request callback deadlocked with configure/confirm")
+            call_thread.join(timeout=1)
+            self.assertTrue(configure_finished.wait(timeout=2))
+            for thread in request_threads:
+                thread.join(timeout=1)
+
+            self.assertEqual(callback_lock_states, [False])
+            self.assertEqual(len(configure_results), 1)
+            self.assertTrue(configure_results[0]["ok"], configure_results[0])
+            self.assertEqual(len(inline_results), 1)
+            self.assertFalse(inline_results[0]["ok"])
+            self.assertEqual(inline_results[0]["error"]["code"], "confirmation_not_found")
+            self.assertTrue(results["call"]["ok"], results["call"])
+            self.assertEqual(results["call"]["result"]["status"],
+                             "awaiting_confirmation")
+            request_ids = [payload["request_id"] for event, payload in emit.dump()
+                           if event == "safety.confirmation_requested"]
+            resolved = [payload for event, payload in emit.dump()
+                        if event == "safety.confirmation_resolved"]
+            self.assertEqual(len(request_ids), 1)
+            self.assertEqual(len(resolved), 1)
+            self.assertEqual(resolved[0]["request_id"], request_ids[0])
+            request_events = [event for event, payload in emit.dump()
+                              if payload and payload.get("request_id") == request_ids[0]]
+            self.assertEqual(request_events, ["safety.confirmation_requested",
+                                              "safety.confirmation_resolved"])
+            self.assertEqual(driver.log(), [])
+        finally:
+            if call_finished.is_set() and configure_finished.is_set():
+                session.stop()
+
+    def test_action_started_callback_can_configure_and_confirm_inline(self):
+        emit = EmitRecorder()
+        driver = NullDriver(enable_a11y=True)
+        session = Session(emit=emit, driver_factory=lambda cfg: driver,
+                          base_config={"safety": {"auth_profile": "full"}})
+        config_at_reconfigure = threading.Event()
+        configure_finished = threading.Event()
+        action_finished = threading.Event()
+        callback_lock_states = []
+        inline_results = []
+        configure_results = []
+        action_threads = []
+        try:
+            session.start({"safety": {"confirm_threshold": "moderate"}})
+            requested = session.call("keyboard.combo", {"keys": ["win", "r"]})
+            self.assertTrue(requested["ok"], requested)
+            self.assertEqual(requested["result"]["status"], "awaiting_confirmation")
+            request_id = requested["result"]["request_id"]
+
+            gate = session._gate
+            engine = session._engine
+            original_reconfigure = gate.reconfigure
+            original_engine_emit = engine._emit
+
+            def observed_reconfigure(cfg):
+                config_at_reconfigure.set()
+                original_reconfigure(cfg)
+
+            gate.reconfigure = observed_reconfigure
+
+            def configure():
+                try:
+                    configure_results.append(session.configure({
+                        "safety": {"auth_profile": "limited"},
+                    }))
+                finally:
+                    configure_finished.set()
+
+            def publish_and_reenter(event, payload):
+                original_engine_emit(event, payload)
+                if event == "action.finished":
+                    action_finished.set()
+                if event != "action.started" or payload.get("tool") != "keyboard.combo":
+                    return
+                callback_lock_states.append(gate._admission_lock._is_owned())
+                thread = threading.Thread(target=configure, daemon=True)
+                action_threads.append(thread)
+                thread.start()
+                config_at_reconfigure.wait(timeout=2)
+                inline_results.append(session.confirm("inline-probe", approve=False))
+
+            engine._emit = publish_and_reenter
+            approval = session.confirm(request_id, approve=True)
+            self.assertTrue(approval["ok"], approval)
+            self.assertEqual(approval["result"]["status"], "approved")
+            self.assertTrue(action_finished.wait(timeout=3),
+                            "action.started callback deadlocked with configure/confirm")
+            self.assertTrue(configure_finished.wait(timeout=2))
+            for thread in action_threads:
+                thread.join(timeout=1)
+
+            self.assertEqual(callback_lock_states, [False])
+            self.assertEqual(len(configure_results), 1)
+            self.assertTrue(configure_results[0]["ok"], configure_results[0])
+            self.assertEqual(configure_results[0]["result"]["auth_profile"], "limited")
+            self.assertEqual(len(inline_results), 1)
+            self.assertFalse(inline_results[0]["ok"])
+            self.assertEqual(inline_results[0]["error"]["code"], "confirmation_not_found")
+            self.assertFalse(any(entry["kind"] == "combo" for entry in driver.log()))
+            events = [(event, payload) for event, payload in emit.dump()
+                      if event in ("action.started", "action.finished")
+                      and payload and payload.get("tool") == "keyboard.combo"]
+            self.assertEqual([event for event, _ in events],
+                             ["action.started", "action.finished"])
+            self.assertEqual(events[-1][1]["error_code"], "not_authorized")
+        finally:
+            if action_finished.is_set() and configure_finished.is_set():
+                session.stop()
 
 
 class TestStandbyInteraction(unittest.TestCase):
@@ -292,6 +1420,115 @@ class TestCaptureAreaCap(unittest.TestCase):
         area = r["result"]["width"] * r["result"]["height"]
         self.assertLessEqual(area, 100_000)
 
+    def test_max_area_applies_to_narrow_tall_region(self):
+        from computer_control.engine import Engine
+        from computer_control.geometry import Surface
+
+        cfg = from_dict({"capture": {"max_area": 100_000}})
+        driver = NullDriver(enable_a11y=True)
+        surface = Surface.from_physical(1920, 0, 0, 3840, 2160)
+        emit = EmitRecorder()
+        gate = SafetyGate(cfg.safety, emit=emit, driver_hotkey_probe=lambda keys: False)
+        engine = Engine(driver, surface, gate, emit, lambda: cfg)
+
+        result = engine.run_tool("screen.capture", {
+            "region": {"x": 0, "y": 0, "width": 1, "height": 1000}
+        })
+
+        self.assertTrue(result["ok"], result)
+        area = result["result"]["width"] * result["result"]["height"]
+        self.assertLessEqual(area, cfg.capture.max_area)
+
+    def test_max_area_applies_when_region_height_rounds_to_one_pixel(self):
+        from computer_control.engine import Engine
+        from computer_control.geometry import Surface
+
+        cfg = from_dict({"capture": {"max_area": 1024}})
+        driver = NullDriver(enable_a11y=True)
+        surface = Surface.from_physical(1920, 0, 0, 3840, 2160)
+        emit = EmitRecorder()
+        gate = SafetyGate(cfg.safety, emit=emit, driver_hotkey_probe=lambda keys: False)
+        engine = Engine(driver, surface, gate, emit, lambda: cfg)
+
+        result = engine.run_tool("screen.capture", {
+            "region": {"x": 0, "y": 0, "width": 1920, "height": 0.5}
+        })
+
+        self.assertTrue(result["ok"], result)
+        area = result["result"]["width"] * result["result"]["height"]
+        self.assertLessEqual(area, cfg.capture.max_area)
+
+    def test_max_area_caps_extreme_aspect_region_dimensions(self):
+        from computer_control.engine import Engine
+        from computer_control.geometry import Surface
+
+        cfg = from_dict({"capture": {"max_area": 1024}})
+        driver = NullDriver(enable_a11y=True)
+        surface = Surface.from_physical(1920, 0, 0, 3840, 2160)
+        emit = EmitRecorder()
+        gate = SafetyGate(cfg.safety, emit=emit, driver_hotkey_probe=lambda keys: False)
+        engine = Engine(driver, surface, gate, emit, lambda: cfg)
+
+        result = engine.run_tool("screen.capture", {
+            "region": {"x": 0, "y": 0, "width": 1, "height": 1080}
+        })
+
+        self.assertTrue(result["ok"], result)
+        area = result["result"]["width"] * result["result"]["height"]
+        self.assertLessEqual(area, cfg.capture.max_area)
+
+    def test_legacy_capture_driver_keeps_working_when_aspect_height_fits(self):
+        from computer_control.drivers.base import BaseDriver, CapturePayload
+        from computer_control.engine import Engine
+        from computer_control.geometry import Surface
+
+        class LegacyCaptureDriver(BaseDriver):
+            capabilities = {"capture": True}
+
+            def capture(self, *, bbox, canvas_width, format="png", quality=85, grayscale=False):
+                left, top, right, bottom = bbox
+                height = max(1, int(round((bottom - top) * canvas_width / max(right - left, 1))))
+                return CapturePayload(b"capture", canvas_width, height, format)
+
+        cfg = from_dict({"capture": {"max_area": 100_000}})
+        driver = LegacyCaptureDriver()
+        surface = Surface.from_physical(1920, 0, 0, 3840, 2160)
+        emit = EmitRecorder()
+        gate = SafetyGate(cfg.safety, emit=emit, driver_hotkey_probe=lambda keys: False)
+        engine = Engine(driver, surface, gate, emit, lambda: cfg)
+
+        result = engine.run_tool("screen.capture", {"region": {"x": 0, "y": 0, "width": 100, "height": 100}})
+
+        self.assertTrue(result["ok"], result)
+
+    def test_legacy_capture_driver_rejects_unrepresentable_cap_cleanly(self):
+        from computer_control.drivers.base import BaseDriver, CapturePayload
+        from computer_control.engine import Engine
+        from computer_control.geometry import Surface
+
+        class LegacyCaptureDriver(BaseDriver):
+            capabilities = {"capture": True}
+
+            def capture(self, *, bbox, canvas_width, format="png", quality=85, grayscale=False):
+                left, top, right, bottom = bbox
+                height = max(1, int(round((bottom - top) * canvas_width / max(right - left, 1))))
+                return CapturePayload(b"capture", canvas_width, height, format)
+
+        cfg = from_dict({"capture": {"max_area": 1024}})
+        driver = LegacyCaptureDriver()
+        surface = Surface.from_physical(1920, 0, 0, 3840, 2160)
+        emit = EmitRecorder()
+        gate = SafetyGate(cfg.safety, emit=emit, driver_hotkey_probe=lambda keys: False)
+        engine = Engine(driver, surface, gate, emit, lambda: cfg)
+
+        result = engine.run_tool("screen.capture", {
+            "region": {"x": 0, "y": 0, "width": 1, "height": 1080}
+        })
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "backend_unavailable")
+        self.assertIn("canvas height", result["error"]["message"])
+
     def test_idle_none_emits_once(self):
         cfg = from_dict({"safety": {"idle_timeout_s": 0.1, "idle_action": "none"}})
         emit = EmitRecorder()
@@ -322,8 +1559,25 @@ class TestStopSemantics(unittest.TestCase):
     def test_queued_task_answered_after_stop(self):
         # The worker is busy with a long first action while a second action
         # waits in the queue; stopping must answer the queued one immediately.
+        # Ordering is forced with events, not sleeps.
         results = {}
         import threading as _t
+
+        first_started = _t.Event()
+        second_queued = _t.Event()
+        original_run_tool = self.session._engine.run_tool
+        original_put = self.session._worker_queue.put
+
+        def blocked_run_tool(tool, arguments):
+            first_started.set()
+            return original_run_tool(tool, arguments)
+
+        def signal_put(task, *args, **kwargs):
+            outcome = original_put(task, *args, **kwargs)
+            second_queued.set()
+            return outcome
+
+        self.session._engine.run_tool = blocked_run_tool
 
         def submit_first():
             results["first"] = self.session.call("wait.pause", {"ms": 600})
@@ -332,11 +1586,12 @@ class TestStopSemantics(unittest.TestCase):
             results["second"] = self.session.call("wait.pause", {"ms": 200})
 
         t1 = _t.Thread(target=submit_first)
-        t2 = _t.Thread(target=submit_second)
         t1.start()
-        time.sleep(0.05)  # first is now running on the worker
+        self.assertTrue(first_started.wait(2), "first action never started on the worker")
+        self.session._worker_queue.put = signal_put
+        t2 = _t.Thread(target=submit_second)
         t2.start()
-        time.sleep(0.05)  # second is queued behind it
+        self.assertTrue(second_queued.wait(2), "second action never reached the queue")
         self.session.stop()
         t1.join(timeout=5)
         t2.join(timeout=5)
@@ -359,6 +1614,194 @@ class TestStopSemantics(unittest.TestCase):
         self.assertEqual(v.decision, "stopped")
         v = gate.evaluate_allow_only("screen.capture", {})
         self.assertEqual(v.decision, "stopped")
+
+    def test_stop_cannot_drain_before_submit_enqueues(self):
+        session = self.session
+        # Keep the failure path short; _submit applies the 0.5s minimum after
+        # adding its normal 60s queueing grace.
+        session._cfg.runtime.max_wait_ms = -60_000
+        first_started = threading.Event()
+        release_first = threading.Event()
+        enqueue_started = threading.Event()
+        release_enqueue = threading.Event()
+        first_result = {}
+        second_result = {}
+        stop_result = {}
+        original_run_tool = session._engine.run_tool
+        original_put = session._worker_queue.put
+
+        def blocked_run_tool(tool, arguments):
+            first_started.set()
+            release_first.wait(3)
+            return original_run_tool(tool, arguments)
+
+        def blocked_put(task, *args, **kwargs):
+            enqueue_started.set()
+            release_enqueue.wait(3)
+            return original_put(task, *args, **kwargs)
+
+        session._engine.run_tool = blocked_run_tool
+
+        def submit_first():
+            first_result["result"] = session.call("wait.pause", {"ms": 1})
+
+        def submit_second():
+            second_result["result"] = session.call("wait.pause", {"ms": 1})
+
+        def stop_session():
+            stop_result["result"] = session.stop()
+
+        first_thread = threading.Thread(target=submit_first)
+        second_thread = threading.Thread(target=submit_second)
+        stop_thread = threading.Thread(target=stop_session)
+        try:
+            first_thread.start()
+            self.assertTrue(first_started.wait(2))
+            session._worker_queue.put = blocked_put
+            second_thread.start()
+            self.assertTrue(enqueue_started.wait(2))
+
+            stop_thread.start()
+            # Stop is serialized behind _submit's session lock (held while the
+            # second task's enqueue is parked): it cannot set the stop flag
+            # before the enqueue completes, so the enqueue is released first
+            # and the stop flag is then observed - deterministic order, no
+            # timing window.
+            release_enqueue.set()
+            self.assertTrue(wait_for(session._stop_requested.is_set, timeout=2))
+            release_first.set()
+            first_thread.join(timeout=2)
+            stop_thread.join(timeout=2)
+            self.assertFalse(first_thread.is_alive())
+            self.assertFalse(stop_thread.is_alive())
+
+            second_thread.join(timeout=2)
+            self.assertFalse(second_thread.is_alive())
+            self.assertNotEqual(first_result["result"].get("error", {}).get("code"), "timeout")
+            self.assertTrue(stop_result["result"]["ok"])
+            self.assertEqual(second_result["result"]["error"]["code"], "safety_stopped")
+        finally:
+            release_first.set()
+            release_enqueue.set()
+            for thread in (first_thread, second_thread, stop_thread):
+                if thread.ident is not None:
+                    thread.join(timeout=2)
+
+    def test_restart_does_not_reanimate_timed_out_worker(self):
+        session = self.session
+        old_worker = session._worker
+        old_queue = session._worker_queue
+        old_stop_requested = session._stop_requested
+        action_started = threading.Event()
+        release_action = threading.Event()
+        action_thread_id = {}
+        original_run_tool = session._engine.run_tool
+
+        def blocked_run_tool(tool, arguments):
+            action_started.set()
+            release_action.wait(30)
+            return original_run_tool(tool, arguments)
+
+        session._engine.run_tool = blocked_run_tool
+        first_result = {}
+        first_caller = threading.Thread(
+            target=lambda: first_result.update(result=session.call("wait.pause", {"ms": 1}))
+        )
+        first_caller.start()
+        self.assertTrue(action_started.wait(2))
+
+        # Model the bounded join expiring without spending 30 seconds in the
+        # regression test. The worker remains blocked in its current action.
+        with mock.patch.object(old_worker, "join", return_value=None):
+            stopped = session.stop()
+        self.assertTrue(stopped["ok"])
+        self.assertTrue(old_worker.is_alive())
+
+        allow_new_worker = threading.Event()
+        task_queued = threading.Event()
+        original_thread_start = threading.Thread.start
+
+        def start_gated_worker(worker):
+            # Install the queue gate before the restarted worker can call
+            # get(); patching after start would leave a race with its first
+            # queue read.
+            if worker.name == "session-worker":
+                worker_queue = worker._args[0]
+                original_get = worker_queue.get
+
+                def wait_for_new_worker(timeout=None):
+                    # A stale worker using the new queue will not be gated and
+                    # will deterministically take any action already queued.
+                    if threading.current_thread() is worker:
+                        allow_new_worker.wait()
+                    return original_get(timeout=timeout)
+
+                worker_queue.get = wait_for_new_worker
+            return original_thread_start(worker)
+
+        with mock.patch.object(threading.Thread, "start", start_gated_worker):
+            session.start({})
+        new_worker = session._worker
+        new_queue = session._worker_queue
+        new_stop_requested = session._stop_requested
+        original_put = new_queue.put
+
+        def record_put(task, *args, **kwargs):
+            result = original_put(task, *args, **kwargs)
+            task_queued.set()
+            return result
+
+        new_queue.put = record_put
+        restarted_engine = session._engine
+        restarted_run_tool = restarted_engine.run_tool
+
+        def record_action_thread(tool, arguments):
+            action_thread_id["id"] = threading.get_ident()
+            return restarted_run_tool(tool, arguments)
+
+        restarted_engine.run_tool = record_action_thread
+        new_result = {}
+        new_caller = threading.Thread(
+            target=lambda: new_result.update(result=session.call("wait.pause", {"ms": 1}))
+        )
+        new_caller.start()
+        try:
+            self.assertTrue(task_queued.wait(5))
+
+            release_action.set()
+            old_worker.join(timeout=2)
+            self.assertFalse(old_worker.is_alive())
+            allow_new_worker.set()
+            new_caller.join(timeout=2)
+            first_caller.join(timeout=2)
+            self.assertFalse(first_caller.is_alive())
+            self.assertFalse(new_caller.is_alive())
+            self.assertIn("result", first_result)
+            self.assertTrue(new_result["result"]["ok"])
+            self.assertEqual(action_thread_id["id"], new_worker.ident)
+            self.assertIsNot(old_queue, new_queue)
+            self.assertIsNot(old_stop_requested, new_stop_requested)
+        finally:
+            release_action.set()
+            allow_new_worker.set()
+            for thread in (old_worker, first_caller, new_caller, new_worker):
+                if thread.ident is not None:
+                    thread.join(timeout=2)
+
+
+class TestSessionWorkerCleanup(unittest.TestCase):
+    def test_driver_worker_cleanup_runs_on_worker_thread(self):
+        driver = NullDriver(enable_a11y=True)
+        closed = threading.Event()
+        closed_on = []
+        driver.close_worker = lambda: (closed_on.append(threading.get_ident()), closed.set())
+        session = Session(emit=lambda t, p=None: None, driver_factory=lambda cfg: driver)
+        session.start({})
+        worker_ident = session._worker.ident
+        session.stop()
+
+        self.assertTrue(closed.is_set())
+        self.assertEqual(closed_on, [worker_ident])
 
 
 class TestConfirmEventOrder(unittest.TestCase):
@@ -506,6 +1949,40 @@ class TestHttpTransport(unittest.TestCase):
         response = json.loads(body)
         self.assertEqual(response["result"]["result"]["state"], "idle")
 
+    def test_request_error_preserves_valid_id(self):
+        status, body = self._post(
+            b'{"jsonrpc":"2.0","id":5,"method":"system.status","params":[]}'
+        )
+        self.assertEqual(status, 400)
+        response = json.loads(body)
+        self.assertEqual(response["id"], 5)
+        self.assertEqual(response["error"]["code"], -32602)
+
+    def test_request_error_uses_null_for_invalid_id(self):
+        status, body = self._post(
+            b'{"jsonrpc":"2.0","id":true,"method":"system.status","params":{}}'
+        )
+        self.assertEqual(status, 400)
+        response = json.loads(body)
+        self.assertIsNone(response["id"])
+
+    def test_malformed_notification_is_suppressed_but_other_errors_respond(self):
+        status, body = self._post(
+            b'{"jsonrpc":"2.0","method":"system.status","params":[]}'
+        )
+        self.assertEqual(status, 204)
+        self.assertEqual(body, b"")
+
+        for request in (
+            b'{"jsonrpc":"2.0","id":null,"method":"system.status","params":[]}',
+            b'{"jsonrpc":"2.0","method":"","params":[]}',
+        ):
+            with self.subTest(request=request):
+                status, body = self._post(request)
+                self.assertEqual(status, 400)
+                response = json.loads(body)
+                self.assertIsNone(response["id"])
+
     def test_health(self):
         import urllib.request
 
@@ -574,6 +2051,33 @@ class TestCheckExitCode(unittest.TestCase):
 
 
 class TestCliCommands(unittest.TestCase):
+    def test_config_option_before_or_after_command_overrides_environment(self):
+        import os
+        import tempfile
+        from computer_control import cli
+
+        with tempfile.TemporaryDirectory() as d:
+            explicit = os.path.join(d, "explicit.json")
+            invalid_env = os.path.join(d, "invalid-env.json")
+            with open(explicit, "w", encoding="utf-8") as fh:
+                json.dump({"platform": {"name": "dry-run"}}, fh)
+            with open(invalid_env, "w", encoding="utf-8") as fh:
+                fh.write("{invalid json")
+
+            old_env = os.environ.get("COMPUTER_CONTROL_CONFIG")
+            os.environ["COMPUTER_CONTROL_CONFIG"] = invalid_env
+            try:
+                for argv in (("--config", explicit, "check"),
+                             ("check", "--config", explicit)):
+                    with self.subTest(argv=argv):
+                        args = cli._build_parser().parse_args(argv)
+                        self.assertEqual(cli._config(args).platform.name, "dry-run")
+            finally:
+                if old_env is None:
+                    os.environ.pop("COMPUTER_CONTROL_CONFIG", None)
+                else:
+                    os.environ["COMPUTER_CONTROL_CONFIG"] = old_env
+
     def test_version_flag(self):
         import subprocess
         import sys

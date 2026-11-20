@@ -7,6 +7,7 @@ root is generated from it (they must match - the check command verifies).
 from __future__ import annotations
 
 from computer_control import actions as act
+from computer_control.version import __version__
 
 MANIFEST_META = {
     "schema_version": 1,
@@ -16,7 +17,7 @@ MANIFEST_META = {
     "description": ("Desktop control plugin for the dsh harness: screen capture, pointer and "
                     "keyboard injection, accessibility-tree driven semantic actions, with an "
                     "emergency stop, allow/deny rules, confirmation flow and idle standby."),
-    "version": "0.1.0",
+    "version": __version__,
     "author": "plugin-contributors",
     "license": "MIT",
     "entry": {"command": ["python", "-m", "computer_control", "serve"], "working_directory": "."},
@@ -34,10 +35,11 @@ _EVENTS = [
     {"name": "session.idle", "summary": "No actions for the configured idle timeout; the session entered standby."},
     {"name": "action.started", "summary": "A tool call began executing."},
     {"name": "action.finished", "summary": "A tool call finished, with its result envelope."},
-    {"name": "batch.finished", "summary": "A batch completed with the aggregated results."},
+    {"name": "batch.finished", "summary": "A batch completed with its per-item result envelopes."},
     {"name": "safety.confirmation_requested", "summary": "A high-risk action is pending human approval; the harness must ask the user."},
     {"name": "safety.confirmation_resolved", "summary": "A pending confirmation was approved or denied."},
     {"name": "safety.confirmation_expired", "summary": "A pending confirmation timed out and was denied."},
+    {"name": "safety.grant_changed", "summary": "The authorization profile changed (in-band narrowing or a host grant)."},
     {"name": "safety.panic_triggered", "summary": "The emergency stop engaged (hotkey, protocol request or panic file)."},
     {"name": "safety.panic_released", "summary": "The emergency stop was disengaged."},
 ]

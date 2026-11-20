@@ -20,6 +20,7 @@ reaches the wire (stdio notification) and the event ring (HTTP replay).
 from __future__ import annotations
 
 import json
+import math
 import sys
 import threading
 import time
@@ -47,6 +48,7 @@ class EventRing:
     def __init__(self, size: int = 200):
         self._size = size
         self._events = []
+        self._next_sequence = 1
         self._subscribers = set()
         self._dropped = 0
         self._lock = threading.Lock()
@@ -54,6 +56,8 @@ class EventRing:
     def publish(self, event_type: str, payload: Optional[dict]) -> None:
         event = {"type": event_type, "payload": payload, "at": time.time()}
         with self._lock:
+            event["_sequence"] = self._next_sequence
+            self._next_sequence += 1
             self._events.append(event)
             if len(self._events) > self._size:
                 self._events = self._events[-self._size:]
@@ -85,10 +89,11 @@ class EventRing:
                     "dropped": self._dropped}
 
 
-def _notify(write, event_type, payload) -> None:
+def _notify(write, flush, event_type, payload) -> None:
     line = json.dumps({"jsonrpc": "2.0", "method": "event",
                        "params": {"type": event_type, "payload": payload}})
     write(line.encode("utf-8") + b"\n")
+    flush()
 
 
 def _install_sink(router: Router, ring: EventRing,
@@ -111,7 +116,7 @@ def serve_stdio(router: Router, stdin, stdout, stop_event: Optional[threading.Ev
     the router's event ring (so HTTP subscribers can replay them).
     """
     ring = EventRing()
-    _install_sink(router, ring, extra=lambda t, p: _notify(stdout.write, t, p))
+    _install_sink(router, ring, extra=lambda t, p: _notify(stdout.write, stdout.flush, t, p))
     while True:
         if stop_event is not None and stop_event.is_set():
             break
@@ -130,15 +135,17 @@ def serve_stdio(router: Router, stdin, stdout, stop_event: Optional[threading.Ev
             request = load_request(line)
             response = router.handle(request)
         except ProtocolError as exc:
-            # Parse/invalid-request failures: respond with the request's id if available,
-            # or null id per JSON-RPC 2.0 specification.
-            request_id = _extract_id(line)
-            response = {"jsonrpc": "2.0", "id": request_id, "error": exc.as_jsonrpc()}
+            if not _is_notification(line):
+                # Parse/invalid-request failures: respond with the request's id if available,
+                # or null id per JSON-RPC 2.0 specification.
+                request_id = _extract_valid_request_id(line)
+                response = {"jsonrpc": "2.0", "id": request_id, "error": exc.as_jsonrpc()}
         except Exception as exc:
             log("unhandled error: %s\n%s" % (exc, _stack()))
-            request_id = _extract_id(line)
-            response = {"jsonrpc": "2.0", "id": request_id,
-                        "error": {"code": -32603, "message": "internal error: %s" % exc}}
+            if not _is_notification(line):
+                request_id = _extract_valid_request_id(line)
+                response = {"jsonrpc": "2.0", "id": request_id,
+                            "error": {"code": -32603, "message": "internal error: %s" % exc}}
         if response is not None:
             try:
                 stdout.write(json.dumps(response).encode("utf-8") + b"\n")
@@ -156,6 +163,31 @@ def _extract_id(line: bytes):
     except Exception:
         pass
     return None
+
+
+def _extract_valid_request_id(body: bytes):
+    """Return a usable JSON-RPC ID from a body, or null when it is invalid."""
+    request_id = _extract_id(body)
+    if isinstance(request_id, bool) or not isinstance(request_id, (str, int, float, type(None))):
+        return None
+    if isinstance(request_id, float) and not math.isfinite(request_id):
+        return None
+    return request_id
+
+
+def _is_notification(body: bytes) -> bool:
+    """Return whether a JSON-RPC request-shaped object has no ID member."""
+    try:
+        request = json.loads(body.decode("utf-8"))
+    except Exception:
+        return False
+    return (
+        isinstance(request, dict)
+        and "id" not in request
+        and request.get("jsonrpc") == "2.0"
+        and isinstance(request.get("method"), str)
+        and bool(request["method"])
+    )
 
 
 def _stack() -> str:
@@ -202,7 +234,13 @@ def make_http_server(router: Router, host: str, port: int):
             try:
                 request = load_request(body)
             except ProtocolError as exc:
-                self._json_response(400, {"jsonrpc": "2.0", "id": None, "error": exc.as_jsonrpc()})
+                if _is_notification(body):
+                    self.send_response(204)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                request_id = _extract_valid_request_id(body)
+                self._json_response(400, {"jsonrpc": "2.0", "id": request_id, "error": exc.as_jsonrpc()})
                 return
             try:
                 response = router.handle(request)
@@ -243,20 +281,22 @@ def make_http_server(router: Router, host: str, port: int):
             self.end_headers()
             import queue as queue_module
 
-            # subscribe first, then replay, then skip anything duplicated by
-            # the live feed (events are timestamped by the ring)
+            # Subscribe first, then replay. Sequence numbers let us skip
+            # replay events also present in the live queue without dropping
+            # distinct events that happen to share a timestamp.
             queue_ = ring.subscribe()
             try:
                 recent = ring.recent()
-                last_at = recent[-1]["at"] if recent else 0.0
+                last_sequence = recent[-1]["_sequence"] if recent else 0
                 for event in recent:
                     self._sse(event)
                 keepalive = time.monotonic()
                 while True:
                     try:
                         event = queue_.get(timeout=5)
-                        if event["at"] > last_at:
+                        if event["_sequence"] > last_sequence:
                             self._sse(event)
+                            last_sequence = event["_sequence"]
                     except queue_module.Empty:
                         if time.monotonic() - keepalive > 15:
                             self.wfile.write(b": keepalive\n\n")

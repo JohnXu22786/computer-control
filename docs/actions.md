@@ -14,7 +14,7 @@
 | `scale` | float | 1.0 | 画布相对缩放 0.1-1.0，越小越省 token |
 | `grayscale` | bool | false | 灰度化以省 token |
 
-返回：`frame`（单调递增帧号）、`width/height`、`bytes`、`data_url`、`canvas`。
+返回：`frame`（单调递增帧号）、`width/height`、`bytes`、`data_url`、`canvas`。`canvas` 描述返回图像的实际尺寸；后续指针坐标按该图像画布映射到对应的物理区域，包括 `scale` 缩放和区域截图。
 
 示例：`{"region": {"x": 0, "y": 0, "width": 400, "height": 300}, "format": "jpeg", "scale": 0.5}`
 
@@ -29,7 +29,7 @@
 
 | 参数 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `x`, `y` | float | 无 | 先移动到此再点击；缺省在当前位置点击 |
+| `x`, `y` | float | 无 | 必须同时提供或同时省略；提供时先移动再点击，省略时在当前位置点击 |
 | `button` | string | `left` | `left` / `middle` / `right` |
 | `times` | int | 1 | 1/2/3（单击/双击/三击） |
 | `hold_ms` | int | 0 | 按下后保持毫秒数（长按） |
@@ -49,7 +49,7 @@
 | --- | --- | --- | --- |
 | `axis` | string | `vertical` | `vertical` / `horizontal` |
 | `amount` | float | 必填 | 滚轮格数，正上/右、负下/左（-100~100） |
-| `x`, `y` | float | 无 | 先移动到此再滚 |
+| `x`, `y` | float | 无 | 必须同时提供或同时省略；提供时先移动再滚，省略时在当前位置滚动 |
 
 ## keyboard.press
 

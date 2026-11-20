@@ -87,9 +87,14 @@ class NullDriver(BaseDriver):
     # ------------------------------------------------------------- capture
 
     def capture(self, bbox, canvas_width, format="png", quality=85, grayscale=False):
+        return self.capture_with_dimensions(bbox, canvas_width, None, format, quality, grayscale)
+
+    def capture_with_dimensions(self, bbox, canvas_width, canvas_height, format="png",
+                                quality=85, grayscale=False):
         left, top, right, bottom = bbox
         width = max(1, int(canvas_width))
-        height = max(1, int(round((bottom - top) * width / max(right - left, 1))))
+        height = (max(1, int(round((bottom - top) * width / max(right - left, 1))))
+                  if canvas_height is None else max(1, int(canvas_height)))
         self._record(kind="capture", bbox=(left, top, right, bottom),
                      canvas_width=width, format=format, quality=quality, grayscale=grayscale)
         if format == "jpeg":
@@ -195,11 +200,11 @@ class NullDriver(BaseDriver):
             "id": 1, "role": "window", "name": "Fake Application", "rect": [0, 0, 800, 600],
             "children": [
                 {"id": 2, "role": "edit", "name": "Search box", "rect": [10, 10, 200, 28]},
-                {"id": 3, "role": "button", "name": "Go", "rect": [220, 10, 60, 28]},
+                {"id": 3, "role": "button", "name": "Go", "rect": [220, 10, 280, 38]},
                 {"id": 4, "role": "list", "name": "Results",
                  "children": [
-                     {"id": 5, "role": "listitem", "name": "Result one", "rect": [10, 50, 300, 20]},
-                     {"id": 6, "role": "listitem", "name": "Result two", "rect": [10, 72, 300, 20]},
+                     {"id": 5, "role": "listitem", "name": "Result one", "rect": [10, 50, 310, 70]},
+                     {"id": 6, "role": "listitem", "name": "Result two", "rect": [10, 72, 310, 92]},
                  ]},
             ],
         }

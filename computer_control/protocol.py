@@ -22,6 +22,7 @@ Events are JSON-RPC notifications:
 from __future__ import annotations
 
 import json
+import math
 import threading
 from typing import Callable, Optional
 
@@ -59,6 +60,14 @@ def load_request(line: bytes):
         raise ProtocolError("parse error: %s" % exc, PARSE_ERROR)
     if not isinstance(request, dict):
         raise ProtocolError("request must be a JSON object", INVALID_REQUEST)
+    if "id" in request:
+        request_id = request["id"]
+        if request_id is not None and (
+            isinstance(request_id, bool)
+            or not isinstance(request_id, (str, int, float))
+            or isinstance(request_id, float) and not math.isfinite(request_id)
+        ):
+            raise ProtocolError("'id' must be a string, number, or null", INVALID_REQUEST)
     if request.get("jsonrpc") != "2.0":
         raise ProtocolError("missing or invalid 'jsonrpc' field", INVALID_REQUEST)
     method = request.get("method")
@@ -87,13 +96,16 @@ class Router:
     emits; transports install it so events reach subscribers and the wire.
     ``base_config`` (raw dict, usually the plugin's config file) is the base
     that session.start parameters override. ``driver_factory`` lets tests
-    inject a recording driver.
+    inject a recording driver. ``control_file`` enables the out-of-band
+    host control channel (see host_control); ``log`` receives its diagnostics.
     """
 
     def __init__(self, session_factory: Optional[Callable[[], Session]] = None,
                  event_sink: Optional[Callable[[str, Optional[dict]], None]] = None,
                  base_config: Optional[dict] = None,
-                 driver_factory: Optional[Callable] = None):
+                 driver_factory: Optional[Callable] = None,
+                 control_file: Optional[str] = None,
+                 log: Optional[Callable[[str], None]] = None):
         self._event_sink = event_sink or (lambda event_type, payload=None: None)
         self._base_config = base_config or {}
         self._driver_factory = driver_factory
@@ -105,6 +117,9 @@ class Router:
         self._factory = session_factory or make_default_session
         self._session_cache = None
         self._session_lock = threading.Lock()
+        # Host-only capabilities (Session.grant_profile) are deliberately absent
+        # from this table: whatever is listed here is reachable in-band by the
+        # agent, and no in-band route may be able to widen authorization.
         self._handlers = {
             "session.start": self._session_start,
             "session.stop": self._session_stop,
@@ -117,6 +132,39 @@ class Router:
             "tools.list": self._tools_list,
             "system.status": self._system_status,
         }
+        # Out-of-band host control channel (grant changes / host-only opts).
+        # Router-level, not session-level: its seq counter must survive
+        # session stop/start, and it applies to whichever session is live.
+        self._control_channel = None
+        if control_file:
+            from computer_control.host_control import HostControlChannel
+            self._control_channel = HostControlChannel(
+                control_file, self._apply_host_directive, log=log)
+            self._control_channel.start()
+
+    def close(self) -> None:
+        """Stop the control channel (if any). Sessions are left alone - the
+        transports own their lifecycle."""
+        channel = self._control_channel
+        self._control_channel = None
+        if channel is not None:
+            channel.close()
+
+    def _apply_host_directive(self, directive: dict) -> bool:
+        with self._session_lock:
+            session = self._session_cache
+        if session is None or not session.started:
+            return False  # stays pending; lands on the next live session
+        try:
+            session.apply_host_directive(directive)
+        except SessionError as exc:
+            if exc.code == "not_started":
+                # stop() can win after the started check above. Leave the
+                # directive pending so the channel retries it on the next
+                # live session instead of consuming its sequence number.
+                return False
+            raise
+        return True
 
     # ------------------------------------------------------------ dispatch
 
@@ -127,9 +175,9 @@ class Router:
 
     def handle(self, request: dict) -> Optional[dict]:
         """Handle one parsed request; returns a response dict, or None for
-        notifications (requests without an id). Notifications never receive
+        notifications (requests without an id member). Notifications never receive
         a response, not even for unknown methods."""
-        is_notification = request.get("id") is None
+        is_notification = "id" not in request
         handler = self._handlers.get(request.get("method"))
         if handler is None:
             if is_notification:
@@ -167,13 +215,20 @@ class Router:
                     "meta": {}}
 
     def _session_start(self, params):
-        return self._guard(lambda: self._get_session().start(params.get("config") or params), params)
+        config = params["config"] if "config" in params else params
+        session = self._get_session()
+        channel = self._control_channel
+        if channel is None:
+            return self._guard(lambda: session.start(config), params)
+        return self._guard(lambda: channel.start_session(
+            lambda directive: session.start(config, host_directive=directive)), params)
 
     def _session_stop(self, params):
         return self._guard(self._get_session().stop, params)
 
     def _session_configure(self, params):
-        return self._guard(lambda: self._get_session().configure(params.get("patch") or params), params)
+        patch = params["patch"] if "patch" in params else params
+        return self._guard(lambda: self._get_session().configure(patch), params)
 
     def _session_confirm(self, params):
         request_id = params.get("request_id")
@@ -199,7 +254,11 @@ class Router:
         if not isinstance(tool, str) or not tool:
             return {"ok": False, "result": None,
                     "error": {"code": "invalid_arguments", "message": "tool is required"}, "meta": {}}
-        return self._guard(lambda: self._get_session().call(tool, params.get("arguments") or {}), params)
+        arguments = params.get("arguments", {})
+        if not isinstance(arguments, dict):
+            return {"ok": False, "result": None,
+                    "error": {"code": "invalid_arguments", "message": "arguments must be an object"}, "meta": {}}
+        return self._guard(lambda: self._get_session().call(tool, arguments), params)
 
     def _tools_call_batch(self, params):
         items = params.get("items")

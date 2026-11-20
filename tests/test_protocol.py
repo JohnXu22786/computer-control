@@ -70,9 +70,102 @@ class RouterFixture(unittest.TestCase):
 
 
 class TestLifecycle(RouterFixture):
+    def test_start_accepts_empty_config_wrapper(self):
+        response = self.start_session({"config": {}})
+
+        self.assertTrue(response["result"]["ok"], response)
+        self.assertEqual(response["result"]["result"]["state"], "ready")
+
+    def test_configure_accepts_empty_patch_wrapper(self):
+        self.start_session()
+
+        response = self.call("session.configure", {"patch": {}})
+
+        self.assertTrue(response["result"]["ok"], response)
+
+    def test_start_unrepresentable_timeout_returns_invalid_config(self):
+        large_integer = json.loads("1" + "0" * 400)
+        response = self.start_session({"safety": {"confirm_timeout_s": large_integer}})
+        self.assertFalse(response["result"]["ok"])
+        self.assertEqual(response["result"]["error"]["code"], "invalid_config")
+
+    def test_start_non_object_config_returns_invalid_config_without_starting(self):
+        for config in ([1], []):
+            with self.subTest(config=config):
+                response = self.start_session({"config": config})
+
+                self.assertFalse(response["result"]["ok"])
+                self.assertEqual(response["result"]["error"]["code"], "invalid_config")
+                self.assertFalse(self.router._session_cache.started)
+
+    def test_configure_non_object_patch_returns_invalid_config_without_mutation(self):
+        self.start_session()
+        original_width = self.router._session_cache._cfg.capture.default_width
+
+        for patch in ([1], []):
+            with self.subTest(patch=patch):
+                response = self.call("session.configure", {"patch": patch})
+
+                self.assertFalse(response["result"]["ok"])
+                self.assertEqual(response["result"]["error"]["code"], "invalid_config")
+                self.assertTrue(self.router._session_cache.started)
+                self.assertEqual(self.router._session_cache._cfg.capture.default_width, original_width)
+
     def test_unknown_method(self):
         response = self.call("no.such.method")
         self.assertEqual(response["error"]["code"], -32601)
+
+    def test_explicit_null_id_is_a_request(self):
+        calls = []
+        self.router._handlers["test.echo"] = lambda params: calls.append(params) or {"value": params["value"]}
+
+        response = self.router.handle({
+            "jsonrpc": "2.0",
+            "id": None,
+            "method": "test.echo",
+            "params": {"value": "handled"},
+        })
+
+        self.assertEqual(calls, [{"value": "handled"}])
+        self.assertEqual(response, {
+            "jsonrpc": "2.0",
+            "id": None,
+            "result": {"value": "handled"},
+        })
+
+    def test_invalid_id_types_are_rejected_before_dispatch(self):
+        calls = []
+        self.router._handlers["test.echo"] = lambda params: calls.append(params) or {"ok": True}
+
+        for invalid_id in ([], {}, True, False, float("nan"), float("inf"), float("-inf")):
+            with self.subTest(id=invalid_id):
+                request = json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": invalid_id,
+                    "method": "test.echo",
+                }).encode("utf-8")
+                with self.assertRaises(ProtocolError) as raised:
+                    self.router.handle_line(request)
+                self.assertEqual(raised.exception.code, -32600)
+
+        self.assertEqual(calls, [])
+
+    def test_string_and_number_ids_are_preserved(self):
+        calls = []
+        self.router._handlers["test.echo"] = lambda params: calls.append(params) or {"ok": True}
+
+        for request_id in ("request-1", 2.5):
+            with self.subTest(id=request_id):
+                request = json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "test.echo",
+                }).encode("utf-8")
+                response = self.router.handle_line(request)
+                self.assertEqual(response["id"], request_id)
+                self.assertEqual(response["result"], {"ok": True})
+
+        self.assertEqual(len(calls), 2)
 
     def test_call_before_start(self):
         response = self.call("tools.call", {"tool": "screen.capture", "arguments": {}})
@@ -137,6 +230,24 @@ class TestTools(RouterFixture):
         self.assertIn("action.started", types)
         self.assertIn("action.finished", types)
 
+    def test_falsey_non_object_arguments_are_rejected_before_driver_call(self):
+        self.start_session()
+
+        for arguments in ([], False, 0, ""):
+            with self.subTest(arguments=arguments):
+                response = self.call("tools.call", {
+                    "tool": "screen.capture",
+                    "arguments": arguments,
+                })
+
+                self.assertFalse(response["result"]["ok"])
+                self.assertEqual(response["result"]["error"]["code"], "invalid_arguments")
+                self.assertEqual(self.driver_log(), [])
+
+        response = self.call("tools.call", {"tool": "screen.capture"})
+        self.assertTrue(response["result"]["ok"])
+        self.assertEqual([entry["kind"] for entry in self.driver_log()], ["capture"])
+
     def test_call_batch(self):
         self.start_session()
         r = self.call("tools.call_batch", {
@@ -155,6 +266,21 @@ class TestTools(RouterFixture):
         self.assertFalse(r["result"]["ok"])  # envelope-level failure
         self.assertEqual(r["result"]["error"]["code"], "invalid_arguments")
         self.assertIn("issues", r["result"]["error"]["data"])
+
+    def test_oversized_numeric_argument_is_invalid_arguments(self):
+        self.start_session()
+        calls = (
+            {"tool": "pointer.move", "arguments": {"x": 10 ** 400, "y": 1}},
+            {"tool": "screen.capture", "arguments": {
+                "region": {"x": 10 ** 400, "y": 0, "width": 1, "height": 1},
+            }},
+        )
+        for params in calls:
+            with self.subTest(tool=params["tool"]):
+                r = self.call("tools.call", params)
+                self.assertFalse(r["result"]["ok"])
+                self.assertEqual(r["result"]["error"]["code"], "invalid_arguments")
+                self.assertIn("issues", r["result"]["error"]["data"])
 
     def test_unknown_tool(self):
         self.start_session()
@@ -209,6 +335,33 @@ class TestConfirmationOverProtocol(RouterFixture):
         self.call("session.confirm", {"request_id": rid, "approve": True})
         self.assertTrue(wait_for(lambda: any(k["kind"] == "combo" for k in self.driver_log())))
         self.assertIn("batch.finished", self.event_types())
+
+    def test_approved_batch_event_includes_each_item_result(self):
+        self.start_session({"safety": {"confirm_threshold": "moderate"}})
+        r = self.call("tools.call_batch", {
+            "items": [
+                {"tool": "wait.pause", "arguments": {"ms": 1}},
+                {"tool": "unknown.tool", "arguments": {}},
+                {"tool": "keyboard.combo", "arguments": {"keys": ["win", "l"]}},
+            ],
+            "continue_on_error": True,
+        })
+        pending = r["result"]["result"]
+        self.assertEqual(pending["status"], "awaiting_confirmation")
+
+        self.call("session.confirm", {"request_id": pending["request_id"], "approve": True})
+        self.assertTrue(wait_for(lambda: any(event == "batch.finished" for event, _ in self.events)))
+        finished = next(payload for event, payload in self.events if event == "batch.finished")
+
+        self.assertEqual(finished["status"], "completed")
+        self.assertEqual(finished["items"], 3)
+        self.assertEqual(len(finished["results"]), 3)
+        self.assertTrue(finished["results"][0]["ok"])
+        self.assertEqual(finished["results"][0]["meta"]["tool"], "wait.pause")
+        self.assertFalse(finished["results"][1]["ok"])
+        self.assertEqual(finished["results"][1]["error"]["code"], "unknown_tool")
+        self.assertIn("tool", finished["results"][1]["error"]["message"])
+        self.assertTrue(finished["results"][2]["ok"])
 
     def test_busy_while_confirming(self):
         self.start_session({"safety": {"confirm_threshold": "moderate"}})
@@ -290,6 +443,22 @@ class TestFraming(unittest.TestCase):
         serve_stdio(router, reader, writer)
         self.assertEqual(writer.buffer, b"")
 
+    def test_malformed_notification_gets_no_response(self):
+        router = Router(lambda: Session(emit=lambda t, p=None: None, driver_factory=lambda cfg: NullDriver(enable_a11y=True)))
+        reader = FakeReader([b'{"jsonrpc":"2.0","method":"system.status","params":[]}\n'])
+        writer = FakeWriter()
+        serve_stdio(router, reader, writer)
+        self.assertEqual(writer.buffer, b"")
+
+    def test_explicit_null_id_bad_params_gets_error_response(self):
+        router = Router(lambda: Session(emit=lambda t, p=None: None, driver_factory=lambda cfg: NullDriver(enable_a11y=True)))
+        reader = FakeReader([b'{"jsonrpc":"2.0","id":null,"method":"system.status","params":[]}\n'])
+        writer = FakeWriter()
+        serve_stdio(router, reader, writer)
+        response = json.loads(writer.buffer.decode("utf-8").strip())
+        self.assertIsNone(response["id"])
+        self.assertEqual(response["error"]["code"], -32602)
+
     def test_bad_params_gets_error_response(self):
         router = Router(lambda: Session(emit=lambda t, p=None: None, driver_factory=lambda cfg: NullDriver(enable_a11y=True)))
         reader = FakeReader([b'{"jsonrpc":"2.0","id":3,"method":"tools.call","params":"not-an-object"}\n'])
@@ -316,6 +485,15 @@ class TestFraming(unittest.TestCase):
         for resp in lines:
             self.assertEqual(resp["error"]["code"], -32600)
             self.assertIsNone(resp["id"])
+
+    def test_invalid_id_uses_null_in_error_response(self):
+        router = Router(lambda: Session(emit=lambda t, p=None: None, driver_factory=lambda cfg: NullDriver(enable_a11y=True)))
+        reader = FakeReader([b'{"jsonrpc":"2.0","id":true,"method":"system.status"}\n'])
+        writer = FakeWriter()
+        serve_stdio(router, reader, writer)
+        response = json.loads(writer.buffer.decode("utf-8").strip())
+        self.assertEqual(response["error"]["code"], -32600)
+        self.assertIsNone(response["id"])
 
     def test_invalid_jsonrpc_version_preserves_id(self):
         router = Router(lambda: Session(emit=lambda t, p=None: None, driver_factory=lambda cfg: NullDriver(enable_a11y=True)))

@@ -90,7 +90,15 @@ def parse_hotkey(spec: str):
     """
     if not spec or not spec.strip():
         return []
-    parts = [p.strip().lower() for p in spec.split("+")]
+    parts = []
+    component = []
+    for char in spec.lower():
+        if char == "+" and "".join(component).strip() != "numpad_":
+            parts.append("".join(component).strip())
+            component = []
+        else:
+            component.append(char)
+    parts.append("".join(component).strip())
     if any(not p for p in parts):
         raise ValueError("empty component in hotkey spec %r" % spec)
     if len(parts) != len(set(parts)):
