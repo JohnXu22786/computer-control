@@ -114,6 +114,36 @@ class TestCapture(unittest.TestCase):
         plain = engine.run_tool("screen.capture", {})["result"]
         self.assertNotIn("grid", plain)
 
+    def test_grid_and_pointer_use_capture_frame_on_multimonitor_desktop(self):
+        engine, driver, _, _, _ = make_engine()
+        engine._surface = Surface.from_physical(400, -400, -200, 800, 400)
+        cases = (
+            (None, (-400, -200, 400, 200)),
+            ({"x": 151, "y": 51, "width": 100, "height": 100}, (-98, -98, 102, 102)),
+            ({"x": 27, "y": 27, "width": 100, "height": 100}, (-346, -146, -146, 54)),
+        )
+        for region, bbox in cases:
+            with self.subTest(region=region):
+                args = {"show_grid": True, "scale": 0.5}
+                if region is not None:
+                    args["region"] = region
+                response = engine.run_tool("screen.capture", args)
+                self.assertTrue(response["ok"], response)
+                capture = response["result"]
+                image = Image.open(io.BytesIO(base64.b64decode(capture["data_url"].split(",", 1)[1])))
+                interval = capture["grid"]["interval"]
+                x, y = interval["x"], interval["y"]
+                self.assertNotEqual(image.getpixel((x, y + 3)), image.getpixel((x + 3, y + 3)))
+                self.assertNotEqual(image.getpixel((x + 3, y)), image.getpixel((x + 3, y + 3)))
+                self.assertEqual(capture["grid"]["action_frame"], capture["capture_geometry"]["action_frame"])
+                self.assertEqual(capture["grid"]["action_frame"]["physical_origin"], {"x": bbox[0], "y": bbox[1]})
+                self.assertEqual([e for e in driver.log() if e["kind"] == "capture"][-1]["bbox"], bbox)
+                move = engine.run_tool("pointer.move", {"x": x, "y": y})
+                self.assertTrue(move["ok"], move)
+                factor = (bbox[2] - bbox[0]) / capture["width"]
+                self.assertEqual([e for e in driver.log() if e["kind"] == "move"][-1]["position"],
+                                 (bbox[0] + x * factor, bbox[1] + y * factor))
+
     def test_grid_unknown_frame_preserves_active_capture(self):
         engine, driver, _, _, _ = make_engine()
         first = engine.run_tool("screen.capture", {})
