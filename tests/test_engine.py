@@ -191,6 +191,47 @@ class TestCapture(unittest.TestCase):
                 self.assertEqual(move["position"], (bounds["x"] + point["x"] * scale,
                                                     bounds["y"] + point["y"] * scale))
 
+    def test_capture_geometry_tracks_clipped_crop_and_clamped_pointer(self):
+        engine, driver, _, _, _ = make_engine({"capture": {"max_area": 1024}})
+        engine._surface = Surface.from_physical(100, -150, -50, 150, 90)
+
+        full = engine.run_tool("screen.capture", {"scale": 0.5})
+        self.assertTrue(full["ok"], full)
+        full_geometry = full["result"]["capture_geometry"]
+        self.assertEqual(full_geometry["physical_bounds"],
+                         {"x": -150, "y": -50, "width": 150, "height": 90})
+        self.assertEqual(full_geometry["image"], {"width": 40, "height": 24, "units": "pixels"})
+        self.assertEqual(full_geometry["action_frame"]["physical_pixels_per_unit"], 3.75)
+        engine.run_tool("pointer.move", {"x": 20, "y": 12})
+        self.assertEqual([e for e in driver.log() if e["kind"] == "move"][-1]["position"],
+                         (-75.0, -5.0))
+
+        # Desktop-canvas region extends past the right edge; fractional physical
+        # edges are rounded outward before the output is resized to the area cap.
+        crop = engine.run_tool("screen.capture", {"scale": 0.5, "region": {
+            "x": 99, "y": 1, "width": 4, "height": 3}})
+        self.assertTrue(crop["ok"], crop)
+        geometry = crop["result"]["capture_geometry"]
+        self.assertEqual(geometry["physical_bounds"],
+                         {"x": -2, "y": -49, "width": 2, "height": 5})
+        self.assertEqual(geometry["physical_units"], "pixels")
+        self.assertEqual(geometry["image"], {"width": 19, "height": 48, "units": "pixels"})
+        action = geometry["action_frame"]
+        self.assertEqual(action, {"frame": 2, "type": "capture_relative",
+                                  "target": "virtual_desktop", "units": "image_pixels",
+                                  "image_to_action_scale": {"x": 1, "y": 1},
+                                  "physical_origin": {"x": -2, "y": -49},
+                                  "physical_pixels_per_unit": 2 / 19})
+        self.assertEqual([e for e in driver.log() if e["kind"] == "capture"][-1]["bbox"],
+                         (-2, -49, 0, -44))
+        # Clamp to the returned image and use the width-derived scale
+        # on both axes, despite independent height rounding.
+        for point, expected in (({"x": 0, "y": 0}, (-2.0, -49.0)),
+                                ({"x": 100, "y": 100}, (-2 + 18 * 2 / 19, -49 + 47 * 2 / 19))):
+            moved = engine.run_tool("pointer.move", point)
+            self.assertTrue(moved["ok"], moved)
+            self.assertEqual([e for e in driver.log() if e["kind"] == "move"][-1]["position"], expected)
+
     def test_capture_rejects_non_object_arguments_before_driver_call(self):
         for arguments in ([], None):
             with self.subTest(arguments=arguments):
