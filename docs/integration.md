@@ -94,7 +94,7 @@ server: {"ok":true,"result":{"status":"awaiting_confirmation","request_id":"cfm-
 server → event safety.confirmation_requested {request_id, tool, arguments, risk, expires_at, timeout_s}
 harness: 弹窗展示「模型想按 Win+R，批准吗？」（显示工具、参数、风险、剩余时间）
 human:   批准
-harness: session.confirm {request_id, approve: true}
+harness: 通过受 ACL 保护的宿主控制文件发送 confirmation 指令
 server → 立即响应（不阻塞）；随后经工作线程执行动作
 server → event safety.confirmation_resolved
 server → event action.started → event action.finished
@@ -137,6 +137,12 @@ dsh 场景下插件是 **stdio 子进程**，宿主调不到 Python 方法 `Sess
   ```json
   {"seq": 7, "auth_profile": "limited", "a11y_snapshot": true}
   ```
+  对用户确认，也可附加一次性字段：
+  ```json
+  {"seq": 8, "auth_profile": "limited", "a11y_snapshot": true,
+   "confirmation": {"request_id": "cfm-...", "approve": true}}
+  ```
+  `confirmation` 只能由宿主写入；字段格式无效或请求已失效时保持拒绝，不执行动作；无效请求会消耗该 `seq`，避免重试同一请求。agent-facing `session.confirm` 会返回 `host_confirmation_required`，且不解析为批准/拒绝。
   - `seq`（必填，正整数，当前服务进程内严格递增）：只有比上一次已生效值更大的 `seq` 才生效——**重授同一档位也要抬 seq**；同一进程内旧文件内容重放是无害空操作，服务进程重启后现存文件会再次应用。
   - `auth_profile` / `a11y_snapshot`（均必填）：每个文件都是完整宿主期望状态快照；更新其中一项时重复写入另一项的当前值。`auth_profile` 可任意方向变更；`a11y_snapshot` 控制 `read_only` / `revoked` 下是否放行 `a11y.snapshot`（`safety.a11y_snapshot_opt_in`）。
   - 内容非法（缺字段、未知键、非法档位）直接忽略且**不消耗 seq**；无会话在运行时指令**挂起待用**，落到下一个启动的会话。删除文件不会改变当前会话；若新进程启动时文件不存在，会话从宿主配置开始。
@@ -166,7 +172,7 @@ python -m computer_control serve
 1. 启动进程并通过 stdin/stdout 读写 UTF-8 行分隔 JSON；stdout 只解析协议消息，stderr 用作日志。
 2. 建立会话：发送 `session.start`，读取 `manifest.json` 或调用 `tools.list` 来发现工具，并将宿主的工具调用映射为 `tools.call` / `tools.call_batch`。
 3. 持续读取服务器发出的 `event` 通知。将 `screen.capture` 的 `data_url` 转为宿主支持的图片内容，便于模型观察屏幕。
-4. 收到 `safety.confirmation_requested` 时，把工具名、参数、风险和超时展示给用户。只有用户明确批准后才调用 `session.confirm`；拒绝、超时应保持拒绝，不能由模型或适配器自动批准。
+4. 收到 `safety.confirmation_requested` 时，把工具名、参数、风险和超时展示给用户。只有用户明确批准后，宿主才通过受 ACL 保护的控制文件发送确认指令；agent-facing `session.confirm` 一律拒绝。拒绝、超时应保持拒绝，不能由模型或适配器自动批准。
 5. 会话结束时调用 `session.stop`，然后关闭子进程。
 
 若宿主更适合 HTTP，可运行：

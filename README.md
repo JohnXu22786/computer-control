@@ -106,10 +106,10 @@ python -m computer_control serve
 The host must send `session.start`, expose `tools.call` or
 `tools.call_batch` as model tools, forward server events, and send
 `session.stop` when the session ends. It must also turn `screen.capture`
-`data_url` results into images the model can inspect. For high-risk actions,
-surface `safety.confirmation_requested` to the user and send
-`session.confirm` only after the user approves; never auto-approve these
-requests. The stdio protocol and examples are documented in
+`data_url` results into images the model can inspect. For high-risk actions, surface `safety.confirmation_requested` to the user.
+Approval must be sent through the validated host-only control file channel;
+`session.confirm` on the agent-facing RPC surface is rejected. Never
+auto-approve these requests. The stdio protocol and examples are documented in
 [`docs/protocol.md`](docs/protocol.md) and
 [`docs/integration.md`](docs/integration.md).
 
@@ -174,7 +174,7 @@ Full integration notes: [`docs/integration.md`](docs/integration.md).
 2. **Lifecycle**: send `session.start` (optionally with config) → wait for the `session.started` event, then call tools; send `session.stop` at the end.
 3. **Calling actions**: `tools.call` (single) or `tools.call_batch` (batch). Responses use a unified `{ok, result, error, meta}` envelope.
 4. **Events**: the server pushes `action.started/finished`, `safety.confirmation_requested`, etc. as `event` notifications.
-5. **Confirmation flow**: high-risk actions return `awaiting_confirmation` and emit a confirmation event; the harness should surface a human approval prompt, then reply via `session.confirm`; timed out confirmations are auto-denied.
+5. **Confirmation flow**: high-risk actions return `awaiting_confirmation` and emit a confirmation event; the harness should surface a human approval prompt and resolve it through the host-only control channel. Agent-facing `session.confirm` requests are rejected; timed out confirmations are auto-denied.
 
 The recommended model loop: `screen.capture` to observe → execute `pointer.*` / `a11y.*` on canvas coordinates → `wait.pause` (if needed) → a fresh screenshot to verify the result.
 

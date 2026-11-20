@@ -80,9 +80,9 @@ class TestStdioClient(BaseServerCase):
         self.assertTrue(combo["ok"])
         self.assertEqual(combo["result"]["status"], "awaiting_confirmation")
         request_id = combo["result"]["request_id"]
-        denied = self.client.call("session.confirm", {"request_id": request_id, "approve": False})
-        self.assertTrue(denied["ok"])
-        self.assertEqual(denied["result"]["status"], "denied")
+        denied = self.client.call("session.confirm", {"request_id": request_id, "approve": True})
+        self.assertFalse(denied["ok"])
+        self.assertEqual(denied["error"]["code"], "host_confirmation_required")
 
     def test_batch_call(self):
         self.start_session()

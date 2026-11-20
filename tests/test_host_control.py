@@ -614,7 +614,40 @@ class TestRouterIntegration(unittest.TestCase):
         self.assertEqual([p.get("approve") for p in resolved], [False])
         response = router.handle({"jsonrpc": "2.0", "id": 2, "method": "session.confirm",
                                   "params": {"request_id": request_id, "approve": True}})
-        self.assertEqual(response["result"]["error"]["code"], "confirmation_not_found")
+        self.assertEqual(response["result"]["error"]["code"], "host_confirmation_required")
+
+    def test_agent_cannot_approve_but_host_control_can(self):
+        router = self.make_router({"safety": {"confirm_threshold": "moderate"}})
+        router.handle({"jsonrpc": "2.0", "id": 1, "method": "session.start", "params": {}})
+        with router._session_lock:
+            session = router._session_cache
+        requested = session.call("keyboard.combo", {"keys": ["win", "r"]})
+        self.assertEqual(requested["result"]["status"], "awaiting_confirmation")
+        request_id = requested["result"]["request_id"]
+
+        response = router.handle({"jsonrpc": "2.0", "id": 2, "method": "session.confirm",
+                                  "params": {"request_id": request_id, "approve": True}})
+        self.assertFalse(response["result"]["ok"])
+        self.assertEqual(response["result"]["error"]["code"], "host_confirmation_required")
+        self.assertEqual(session._driver.log(), [])
+
+        self.write({"seq": 1, "auth_profile": "full", "a11y_snapshot": False,
+                    "confirmation": {"request_id": request_id, "approve": True}})
+        self.assertTrue(router._control_channel.poll_once())
+        for _ in range(100):
+            if any(entry["kind"] == "combo" for entry in session._driver.log()):
+                break
+            threading.Event().wait(0.01)
+        self.assertTrue(any(entry["kind"] == "combo" for entry in session._driver.log()))
+
+        denied_request = session.call("keyboard.combo", {"keys": ["win", "r"]})
+        denied_id = denied_request["result"]["request_id"]
+        self.write({"seq": 2, "auth_profile": "full", "a11y_snapshot": False,
+                    "confirmation": {"request_id": denied_id, "approve": False}})
+        self.assertTrue(router._control_channel.poll_once())
+        self.assertEqual(session._gate.pending_confirmation(), None)
+        self.assertEqual([payload["approve"] for event, payload in self.events
+                          if event == "safety.confirmation_resolved"], [True, False])
 
     def test_control_file_is_invisible_in_band(self):
         # The channel's path appears in no config surface the agent can name:

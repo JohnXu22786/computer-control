@@ -4,8 +4,8 @@
 // computer_control serve`, a line-delimited JSON-RPC 2.0 server over stdio).
 // This module is the thin adapter a dsh profile loads: it spawns that server
 // as a child process, exposes every tool declared in manifest.json as a dsh
-// tool, and forwards high-risk confirmation outcomes via a session.confirm
-// helper tool.
+// tool. High-risk confirmations are resolved only through the host-only
+// control channel, never through an agent-facing tool.
 //
 // Nothing here re-implements capture/injection logic — it only wires the
 // protocol the Python side already speaks. The bridge needs `python` with the
@@ -265,26 +265,6 @@ export function apply(ctx, rowConfig = {}) {
     const ret = ctx.tools && ctx.tools.register ? ctx.tools.register(def) : null;
     if (typeof ret === 'function') disposers.push(ret);
   }
-
-  ctx.tools &&
-    ctx.tools.register &&
-    disposers.push(
-      ctx.tools.register({
-        name: 'session.confirm',
-        description:
-          'Resolve a pending high-risk confirmation surfaced by another tool result (status: "awaiting_confirmation"). Approve to run the action, deny to cancel it.',
-        parameters: {
-          type: 'object',
-          properties: {
-            request_id: { type: 'string', description: 'The request_id from the awaiting_confirmation result.' },
-            approve: { type: 'boolean', description: 'true approves and runs the action; false denies it.' },
-          },
-          required: ['request_id', 'approve'],
-        },
-        output: { schema: { type: 'object', additionalProperties: true } },
-        execute: (args) => client.call('session.confirm', args ?? {}),
-      }),
-    );
 
   if (!tools.length) log('warn', 'manifest.json missing or empty — no tools registered');
 

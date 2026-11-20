@@ -164,6 +164,12 @@ class Router:
                 # live session instead of consuming its sequence number.
                 return False
             raise
+        confirmation = directive.get("confirmation")
+        if confirmation is not None:
+            # The shape was validated by HostControlChannel. Stale, expired,
+            # or unknown IDs resolve to a fail-closed Session error; consume
+            # the directive rather than retrying the same invalid request.
+            session.confirm(confirmation["request_id"], confirmation["approve"])
         return True
 
     # ------------------------------------------------------------ dispatch
@@ -231,14 +237,12 @@ class Router:
         return self._guard(lambda: self._get_session().configure(patch), params)
 
     def _session_confirm(self, params):
-        request_id = params.get("request_id")
-        if not isinstance(request_id, str) or not request_id:
-            return {"ok": False, "result": None,
-                    "error": {"code": "invalid_arguments", "message": "request_id is required"}, "meta": {}}
-        if "approve" not in params or not isinstance(params.get("approve"), bool):
-            return {"ok": False, "result": None,
-                    "error": {"code": "invalid_arguments", "message": "approve (boolean) is required"}, "meta": {}}
-        return self._guard(lambda: self._get_session().confirm(request_id, params["approve"]), params)
+        # This RPC is agent-facing. Approval must arrive over the host-only
+        # control channel, whose file permissions are validated out of band.
+        return {"ok": False, "result": None,
+                "error": {"code": "host_confirmation_required",
+                          "message": "pending confirmations can only be resolved by the host"},
+                "meta": {}}
 
     def _session_resume(self, params):
         return self._guard(self._get_session().resume, params)

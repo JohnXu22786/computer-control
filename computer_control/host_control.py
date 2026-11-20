@@ -84,6 +84,7 @@ from computer_control.config import AUTH_PROFILES
 from computer_control.control_permissions import read_control_file, validate_control_directory
 
 _DIRECTIVE_KEYS = frozenset({"seq", "auth_profile", "a11y_snapshot"})
+_OPTIONAL_DIRECTIVE_KEYS = frozenset({"confirmation"})
 
 
 class HostControlChannel:
@@ -207,7 +208,7 @@ class HostControlChannel:
         if not isinstance(doc, dict):
             self._note("control file: directive must be a JSON object - ignored")
             return None
-        unknown = set(doc) - _DIRECTIVE_KEYS
+        unknown = set(doc) - _DIRECTIVE_KEYS - _OPTIONAL_DIRECTIVE_KEYS
         if unknown:
             self._note("control file: unknown key(s) %s - directive ignored"
                        % ", ".join(sorted(unknown)))
@@ -224,6 +225,16 @@ class HostControlChannel:
         if seq <= self._last_seq:
             return None  # already applied; idempotent re-read of an old directive
 
+        confirmation = doc.get("confirmation")
+        if confirmation is not None:
+            if (not isinstance(confirmation, dict)
+                    or set(confirmation) != {"request_id", "approve"}
+                    or not isinstance(confirmation.get("request_id"), str)
+                    or not confirmation["request_id"]
+                    or not isinstance(confirmation.get("approve"), bool)):
+                self._note("control file: 'confirmation' must contain a request_id and boolean approve - directive ignored")
+                return None
+
         profile = doc["auth_profile"]
         if profile not in AUTH_PROFILES:
             self._note("control file: auth_profile %r is not one of %s - directive ignored"
@@ -233,7 +244,10 @@ class HostControlChannel:
         if not isinstance(opt_in, bool):
             self._note("control file: 'a11y_snapshot' must be a boolean - directive ignored")
             return None
-        return seq, {"auth_profile": profile, "a11y_snapshot": opt_in}
+        directive = {"auth_profile": profile, "a11y_snapshot": opt_in}
+        if confirmation is not None:
+            directive["confirmation"] = confirmation
+        return seq, directive
 
     def _note(self, message: str) -> None:
         if message == self._last_note:
