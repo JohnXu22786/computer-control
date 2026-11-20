@@ -9,7 +9,7 @@ JSON-RPC 2.0，行分隔（每行一个 JSON 对象），UTF-8。HTTP 传输见�
 | `session.start` | 配置对象（可选） | 启动会话；返回 `{state, surface, capabilities, auth_profile}` |
 | `session.stop` | — | 结束会话，释放驱动与看门狗 |
 | `session.configure` | 可配置子集 | 运行时调整规则/阈值等；`safety.auth_profile` 只允许收窄或维持，任何扩权返回 `invalid_config`（扩权只能由宿主带外完成：进程内调 `Session.grant_profile`，或 stdio 子进程场景下写 `--control-file` 控制文件；两者都不进本路由表，agent 不可达。`safety.a11y_snapshot_opt_in` 为宿主专用键，带内出现即 `invalid_config`） |
-| `session.confirm` | `{request_id, approve}` | 批复待确认动作 |
+| `session.confirm` | `{request_id, approve}` | agent-facing 请求固定拒绝（`host_confirmation_required`）；宿主必须通过受保护的控制文件通道处理 |
 | `session.resume` | — | 从 stopped/standby 恢复 |
 | `control.panic` | `{on: bool}` | 程序化急停/解除 |
 | `tools.call` | `{tool, arguments}` | 执行单个动作 |
@@ -150,7 +150,9 @@ JSON-RPC 2.0，行分隔（每行一个 JSON 对象），UTF-8。HTTP 传输见�
 < {"jsonrpc":"2.0","method":"event","params":{"type":"safety.confirmation_requested","payload":{"request_id":"cfm-...","tool":"keyboard.combo","arguments":{"keys":["win","r"]},"risk":"high","timeout_s":30}}}
 
 > {"jsonrpc":"2.0","id":4,"method":"session.confirm","params":{"request_id":"cfm-...","approve":true}}
-< {"jsonrpc":"2.0","id":4,"result":{"ok":true,"result":{"request_id":"cfm-...","status":"approved"},"error":null,"meta":{}}}
+< {"jsonrpc":"2.0","id":4,"result":{"ok":false,"result":null,"error":{"code":"host_confirmation_required","message":"pending confirmations can only be resolved by the host"},"meta":{}}}
+
+宿主在用户批准后通过 `--control-file` 指定的受保护文件发送 `confirmation: {"request_id":"cfm-...","approve":true}` 指令；拒绝时 `approve:false`。详见集成文档中的宿主控制通道。
 < {"jsonrpc":"2.0","method":"event","params":{"type":"safety.confirmation_resolved","payload":{"request_id":"cfm-...","approve":true,"tool":"keyboard.combo"}}}
 < {"jsonrpc":"2.0","method":"event","params":{"type":"action.started","payload":{"tool":"keyboard.combo","arguments":{"keys":["win","r"]}}}}
 < {"jsonrpc":"2.0","method":"event","params":{"type":"action.finished","payload":{"tool":"keyboard.combo","ok":true,"duration_ms":82}}}

@@ -104,7 +104,7 @@ python -m computer_control serve
 `tools.call_batch` 映射为模型工具，转发服务端事件，并在会话结束时发送
 `session.stop`。宿主还需要把 `screen.capture` 返回的 `data_url` 转为模型可读取的
 图片。高风险动作触发 `safety.confirmation_requested` 时，应向用户展示确认请求；
-只有用户明确批准后才能发送 `session.confirm`，不可自动批准。stdio 协议示例见
+用户明确批准后，宿主通过受 ACL 保护的控制文件通道批复；agent-facing `session.confirm` 会被拒绝。不可自动批准。stdio 协议示例见
 [`docs/protocol.md`](docs/protocol.md)，生命周期和事件处理见
 [`docs/integration.md`](docs/integration.md)。
 
@@ -166,7 +166,7 @@ python examples/demo.py
 2. **生命周期**：先发 `session.start`（可带配置）→ 收到 `session.started` 事件后即可调用工具；结束发 `session.stop`。
 3. **调用动作**：`tools.call`（单个）或 `tools.call_batch`（批量）。响应统一为 `{ok, result, error, meta}` 信封。
 4. **事件**：服务端以 `event` 通知推送 `action.started/finished`、`safety.confirmation_requested` 等。
-5. **确认流**：高风险动作返回 `awaiting_confirmation` 并发出确认事件；harness 应弹出人工确认，再以 `session.confirm` 批复；超时自动拒绝。
+5. **确认流**：高风险动作返回 `awaiting_confirmation` 并发出确认事件；harness 应弹出人工确认，只有用户批准后才能通过宿主控制文件通道批复；agent-facing `session.confirm` 会被拒绝；超时自动拒绝。
 
 模型调用动作的推荐循环：`screen.capture` 观察 → 用画布坐标执行 `pointer.*`/`a11y.*` → `wait.pause`（如需）→ 新截图验证结果。
 

@@ -300,8 +300,9 @@ class TestConfirmationOverProtocol(RouterFixture):
 
         self.assertEqual(self.driver_log(), [])  # nothing executed yet
 
-        r = self.call("session.confirm", {"request_id": rid, "approve": True})
-        self.assertTrue(r["result"]["ok"])
+        with self.router._session_lock:
+            r = self.router._session_cache.confirm(rid, approve=True)
+        self.assertTrue(r["ok"])
         self.assertTrue(wait_for(lambda: any(k["kind"] == "combo" for k in self.driver_log())))
         self.assertIn("safety.confirmation_resolved", self.event_types())
         finished = [e for e, p in self.events if e == "action.finished"]
@@ -311,15 +312,16 @@ class TestConfirmationOverProtocol(RouterFixture):
         self.start_session({"safety": {"confirm_threshold": "moderate"}})
         r = self.call("tools.call", {"tool": "keyboard.combo", "arguments": {"keys": ["win", "r"]}})
         rid = r["result"]["result"]["request_id"]
-        r = self.call("session.confirm", {"request_id": rid, "approve": False})
-        self.assertTrue(r["result"]["ok"])
+        with self.router._session_lock:
+            r = self.router._session_cache.confirm(rid, approve=False)
+        self.assertTrue(r["ok"])
         self.assertFalse(any(k["kind"] == "combo" for k in self.driver_log()))
 
     def test_unknown_confirmation_id(self):
         self.start_session()
         r = self.call("session.confirm", {"request_id": "bogus", "approve": True})
         self.assertFalse(r["result"]["ok"])
-        self.assertEqual(r["result"]["error"]["code"], "confirmation_not_found")
+        self.assertEqual(r["result"]["error"]["code"], "host_confirmation_required")
 
     def test_batch_confirmation(self):
         self.start_session({"safety": {"confirm_threshold": "moderate"}})
@@ -332,7 +334,8 @@ class TestConfirmationOverProtocol(RouterFixture):
         result = r["result"]["result"]
         self.assertEqual(result["status"], "awaiting_confirmation")
         rid = result["request_id"]
-        self.call("session.confirm", {"request_id": rid, "approve": True})
+        with self.router._session_lock:
+            self.router._session_cache.confirm(rid, approve=True)
         self.assertTrue(wait_for(lambda: any(k["kind"] == "combo" for k in self.driver_log())))
         self.assertIn("batch.finished", self.event_types())
 
@@ -349,7 +352,8 @@ class TestConfirmationOverProtocol(RouterFixture):
         pending = r["result"]["result"]
         self.assertEqual(pending["status"], "awaiting_confirmation")
 
-        self.call("session.confirm", {"request_id": pending["request_id"], "approve": True})
+        with self.router._session_lock:
+            self.router._session_cache.confirm(pending["request_id"], approve=True)
         self.assertTrue(wait_for(lambda: any(event == "batch.finished" for event, _ in self.events)))
         finished = next(payload for event, payload in self.events if event == "batch.finished")
 
