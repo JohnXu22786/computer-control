@@ -60,6 +60,7 @@ class NullDriver(BaseDriver):
     fake accessibility backend so capability advertisement can be tested."""
 
     supports_capture_grid = True
+    supports_capture_action_frame = True
     platform_name = "dry-run"
 
     def __init__(self, enable_a11y: bool = False):
@@ -104,13 +105,13 @@ class NullDriver(BaseDriver):
             from computer_control.grid_render import draw_grid
 
             image = Image.new("L" if grayscale else "RGB", (width, height), 128 if grayscale else (255, 0, 0))
-            image, _ = draw_grid(image)
+            image, interval = draw_grid(image)
             buffer = io.BytesIO()
             if format == "jpeg":
                 image.save(buffer, "JPEG", quality=quality)
             else:
                 image.save(buffer, "PNG", optimize=False)
-            return CapturePayload(buffer.getvalue(), width, height, format)
+            return CapturePayload(buffer.getvalue(), width, height, format, interval)
         if format == "jpeg":
             return CapturePayload(_JPEG_1PX, width, height, "jpeg")
         return CapturePayload(_PNG_1PX, width, height, "png")

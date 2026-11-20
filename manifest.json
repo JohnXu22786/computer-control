@@ -444,7 +444,7 @@
         {
           "name": "show_grid",
           "type": "bool",
-          "description": "Coordinate grid overlay; true is not yet available.",
+          "description": "Draw a coordinate grid in the current capture-relative action frame.",
           "required": false,
           "default": false
         }

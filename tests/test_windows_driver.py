@@ -163,6 +163,12 @@ class TestWindowsUiaProbe(unittest.TestCase):
 
 
 class TestWindowsDpiAwareness(unittest.TestCase):
+    def test_grid_requires_verified_per_monitor_dpi(self):
+        driver = WindowsDriver.__new__(WindowsDriver)
+        for mode in ("system", "unaware", "per-monitor", "per-monitor-v2"):
+            driver._dpi_mode = mode
+            self.assertEqual(driver.supports_capture_action_frame, mode.startswith("per-monitor"))
+
     def test_false_context_result_uses_per_monitor_fallback(self):
         driver = WindowsDriver.__new__(WindowsDriver)
         driver._user32 = SimpleNamespace(

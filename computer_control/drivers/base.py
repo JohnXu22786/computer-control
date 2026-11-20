@@ -40,6 +40,7 @@ class CapturePayload:
     width: int
     height: int
     format: str  # "png" | "jpeg"
+    grid_interval: Optional[dict] = None
 
 
 class BaseDriver(ABC):
@@ -47,6 +48,7 @@ class BaseDriver(ABC):
 
     platform_name = "abstract"
     supports_capture_grid = False
+    supports_capture_action_frame = False
 
     capabilities = {
         "capture": False,
