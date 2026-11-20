@@ -56,6 +56,18 @@ class TestCapture(unittest.TestCase):
         self.assertIs(engine._action_surface, surface)
         self.assertEqual(engine._frame, first["result"]["frame"])
 
+    def test_show_grid_rejected_without_changing_capture(self):
+        engine, driver, _, _, _ = make_engine()
+        first = engine.run_tool("screen.capture", {"show_grid": False})
+        self.assertTrue(first["ok"], first)
+        surface, frame, log = engine._action_surface, engine._frame, list(driver.log())
+        result = engine.run_tool("screen.capture", {"show_grid": True})
+        self.assertFalse(result["ok"])
+        self.assertIn("grid", str(result).lower())
+        self.assertIs(engine._action_surface, surface)
+        self.assertEqual(engine._frame, frame)
+        self.assertEqual(driver.log(), log)
+
     def test_capture_returns_data_url(self):
         engine, driver, _, _, _ = make_engine()
         r = engine.run_tool("screen.capture", {})

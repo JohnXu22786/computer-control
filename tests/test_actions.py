@@ -65,6 +65,14 @@ class TestValidation(unittest.TestCase):
         args = clean_arguments("keyboard.type", {"text": "hi", "submit": "true"})
         self.assertIs(args["submit"], True)
 
+    def test_show_grid_is_strict_boolean_with_false_default(self):
+        self.assertIs(clean_arguments("screen.capture", {})["show_grid"], False)
+        for value in (True, False):
+            self.assertIs(clean_arguments("screen.capture", {"show_grid": value})["show_grid"], value)
+        for value in (None, 0, 1, "true", [], {}):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                clean_arguments("screen.capture", {"show_grid": value})
+
     def test_ranges(self):
         with self.assertRaises(ValidationError):
             clean_arguments("pointer.click", {"times": 9})

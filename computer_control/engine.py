@@ -334,6 +334,8 @@ class Engine:
     # screen.capture --------------------------------------------------------
 
     def _do_screen_capture(self, args: dict, grid: bool = False) -> ResultDict:
+        if args.get("show_grid"):
+            return self._fail("backend_unavailable", "show_grid is not yet available", tool="screen.capture")
         if not self._driver.capabilities.get("capture"):
             return self._fail("backend_unavailable",
                               "capture backend is not available on this platform", tool="screen.capture")
