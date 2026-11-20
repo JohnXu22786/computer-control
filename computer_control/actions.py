@@ -12,7 +12,7 @@ import fnmatch
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
-from computer_control.keys import UnknownKeyError, parse_key
+from computer_control.keys import UnknownKeyError, parse_hotkey, parse_key
 
 RISK_BENIGN = "benign"
 RISK_MODERATE = "moderate"
@@ -35,6 +35,9 @@ class ValidationError(ValueError):
     def __init__(self, issues: List[str]):
         self.issues = issues
         super().__init__("; ".join(issues))
+
+
+MAX_BATCH_NESTING = 32
 
 
 @dataclass
@@ -122,8 +125,8 @@ def _build_registry() -> dict:
         summary="Click with a button, optionally after moving to a position. Prefer a11y.activate when the element is visible in the accessibility tree.",
         risk=RISK_MODERATE,
         params=[
-            _p("x", "float", "Model-space x coordinate; omit to click at the current pointer position.", minimum=0),
-            _p("y", "float", "Model-space y coordinate; omit to click at the current pointer position.", minimum=0),
+            _p("x", "float", "Model-space x coordinate; provide together with y, or omit both to click at the current pointer position.", minimum=0),
+            _p("y", "float", "Model-space y coordinate; provide together with x, or omit both to click at the current pointer position.", minimum=0),
             _p("button", "str", "Which button.", default="left", choices=["left", "middle", "right"]),
             _p("times", "int", "1, 2 or 3 (single, double, triple click).", default=1, minimum=1, maximum=3),
             _p("hold_ms", "int", "Hold the button down this long before releasing.", default=0, minimum=0, maximum=10_000),
@@ -152,8 +155,8 @@ def _build_registry() -> dict:
         params=[
             _p("axis", "str", "Scroll axis.", default="vertical", choices=["vertical", "horizontal"]),
             _p("amount", "float", "Wheel notches, signed: positive = up/right, negative = down/left.", required=True, minimum=-100, maximum=100),
-            _p("x", "float", "Move here first (model space).", minimum=0),
-            _p("y", "float", "Move here first (model space).", minimum=0),
+            _p("x", "float", "Model-space x coordinate; provide together with y, or omit both to scroll at the current pointer position.", minimum=0),
+            _p("y", "float", "Model-space y coordinate; provide together with x, or omit both to scroll at the current pointer position.", minimum=0),
         ],
         examples=[{"amount": -3}, {"amount": 5, "x": 800, "y": 450}],
     )
@@ -215,7 +218,7 @@ def _build_registry() -> dict:
 
     tools["a11y.activate"] = ActionSpec(
         name="a11y.activate",
-        summary="Semantically activate an element from the latest snapshot (invoke/toggle/select pattern first; pixel click on its bounding box as fallback).",
+        summary="Semantically activate an element from the latest snapshot (auto tries invoke/toggle/select patterns before a pixel click; pattern uses UIA patterns only; pointer skips patterns).",
         risk=RISK_MODERATE,
         params=[
             _p("snapshot_id", "str", "The snapshot_id of the most recent a11y.snapshot. Stale ids are rejected.", required=True),
@@ -277,7 +280,7 @@ def _coerce(param: ParamSpec, raw, issues: List[str], tool: str) -> Any:
             return None
         try:
             value = float(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             issues.append("%s: expected a number, got %r" % (param.name, raw))
             return None
         if not _isfinite(value):
@@ -301,7 +304,14 @@ def _coerce(param: ParamSpec, raw, issues: List[str], tool: str) -> Any:
         return raw
     if param.type == "list":
         if isinstance(raw, str):
-            raw = raw.split("+")
+            if tool == "keyboard.combo":
+                try:
+                    raw = parse_hotkey(raw)
+                except ValueError as exc:
+                    issues.append("%s: %s" % (param.name, exc))
+                    return None
+            else:
+                raw = raw.split("+")
         if not isinstance(raw, list) or not raw:
             issues.append("%s: expected a non-empty list" % param.name)
             return raw
@@ -316,18 +326,26 @@ def _coerce(param: ParamSpec, raw, issues: List[str], tool: str) -> Any:
         if set(raw) != allowed:
             issues.append("%s: expected exactly %s keys" % (param.name, sorted(allowed)))
             return raw
+        valid_numbers = set()
         for key, value in raw.items():
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 issues.append("%s.%s: expected a number" % (param.name, key))
-            elif not _isfinite(float(value)):
-                issues.append("%s.%s: expected a finite number" % (param.name, key))
-        if "width" in raw and raw["width"] <= 0:
+            else:
+                try:
+                    finite = _isfinite(float(value))
+                except OverflowError:
+                    finite = False
+                if not finite:
+                    issues.append("%s.%s: expected a finite number" % (param.name, key))
+                else:
+                    valid_numbers.add(key)
+        if "width" in valid_numbers and raw["width"] <= 0:
             issues.append("%s.width must be positive" % param.name)
-        if "height" in raw and raw["height"] <= 0:
+        if "height" in valid_numbers and raw["height"] <= 0:
             issues.append("%s.height must be positive" % param.name)
-        if "x" in raw and raw["x"] < 0:
+        if "x" in valid_numbers and raw["x"] < 0:
             issues.append("%s.x must be >= 0" % param.name)
-        if "y" in raw and raw["y"] < 0:
+        if "y" in valid_numbers and raw["y"] < 0:
             issues.append("%s.y must be >= 0" % param.name)
         return raw
     issues.append("%s: unsupported type %s" % (param.name, param.type))
@@ -357,7 +375,7 @@ def _validate_key_param(keys, issues, tool) -> None:
         seen.add(name.lower())
 
 
-def clean_arguments(tool: str, raw_args) -> dict:
+def clean_arguments(tool: str, raw_args, _batch_depth: int = 0) -> dict:
     """Validate and normalize arguments for a tool.
 
     Returns the cleaned arguments (defaults filled, types coerced, key names
@@ -366,7 +384,7 @@ def clean_arguments(tool: str, raw_args) -> dict:
     spec = get_spec(tool)
     if spec is None:
         raise ValidationError(["unknown tool %r" % tool])
-    if raw_args is None:
+    if raw_args is None and tool != "screen.capture":
         raw_args = {}
     if not isinstance(raw_args, dict):
         raise ValidationError(["arguments must be an object"])
@@ -410,28 +428,35 @@ def clean_arguments(tool: str, raw_args) -> dict:
         if isinstance(text, str) and len(text) > 10000:
             issues.append("text: too long (%d characters, max 10000)" % len(text))
     elif tool == "batch.execute":
-        items = cleaned.get("items") or []
-        if not items:
-            issues.append("items: must contain at least one action")
-        else:
-            sub_issues = []
-            for i, item in enumerate(items):
-                if not isinstance(item, dict):
-                    sub_issues.append("items[%d]: must be an object {tool, arguments}" % i)
-                    continue
-                item_tool = item.get("tool")
-                if not isinstance(item_tool, str) or not item_tool:
-                    sub_issues.append("items[%d]: missing tool" % i)
-                    continue
-                # unknown tools are allowed here; run_batch reports them as
-                # per-item failures so a batch can continue past them
-                if get_spec(item_tool) is not None:
-                    try:
-                        clean_arguments(item_tool, item.get("arguments"))
-                    except ValidationError as exc:
-                        for issue in exc.issues:
-                            sub_issues.append("items[%d]: %s" % (i, issue))
-            issues.extend(sub_issues)
+        items = cleaned.get("items")
+        if _batch_depth >= MAX_BATCH_NESTING:
+            issues.append("batch nesting exceeds maximum depth (%d)" % MAX_BATCH_NESTING)
+        elif isinstance(items, list):
+            if not items:
+                issues.append("items: must contain at least one action")
+            else:
+                sub_issues = []
+                for i, item in enumerate(items):
+                    if not isinstance(item, dict):
+                        sub_issues.append("items[%d]: must be an object {tool, arguments}" % i)
+                        continue
+                    item_tool = item.get("tool")
+                    if not isinstance(item_tool, str) or not item_tool:
+                        sub_issues.append("items[%d]: missing tool" % i)
+                        continue
+                    # unknown tools are allowed here; run_batch reports them as
+                    # per-item failures so a batch can continue past them
+                    if get_spec(item_tool) is not None:
+                        try:
+                            clean_arguments(
+                                item_tool,
+                                item.get("arguments"),
+                                _batch_depth + (item_tool == "batch.execute"),
+                            )
+                        except ValidationError as exc:
+                            for issue in exc.issues:
+                                sub_issues.append("items[%d]: %s" % (i, issue))
+                issues.extend(sub_issues)
     elif tool == "a11y.activate":
         if cleaned.get("method") == "pointer" and cleaned.get("snapshot_id") is None:
             issues.append("snapshot_id is required even for pointer method (staleness guard)")
@@ -452,7 +477,7 @@ def risk_for(tool: str, arguments: Optional[dict] = None) -> str:
         keys = arguments.get("keys") or []
         if isinstance(keys, str):
             keys = keys.split("+")
-        lowered = {str(k).lower() for k in keys}
+        lowered = {str(k).strip().lower() for k in keys}
         if lowered & _WIN_LIKE or (lowered & _CTRL_LIKE and lowered & _ALT_LIKE):
             risk = RISK_HIGH
     elif tool == "batch.execute":

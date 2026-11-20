@@ -58,6 +58,25 @@ class TestFromDict(unittest.TestCase):
         with self.assertRaises(ConfigError):
             from_dict({"capture": {"default_width": 0}})
 
+    def test_non_finite_safety_timeouts_rejected(self):
+        for key in ("confirm_timeout_s", "idle_timeout_s"):
+            for value in (float("nan"), float("inf"), float("-inf")):
+                with self.subTest(key=key, value=value):
+                    with self.assertRaises(ConfigError):
+                        from_dict({"safety": {key: value}})
+
+    def test_unrepresentable_safety_timeout_integers_rejected(self):
+        large_integer = json.loads("1" + "0" * 400)
+        for key in ("confirm_timeout_s", "idle_timeout_s"):
+            with self.subTest(key=key):
+                with self.assertRaises(ConfigError):
+                    from_dict({"safety": {key: large_integer}})
+
+    def test_finite_safety_timeouts_accepted(self):
+        c = from_dict({"safety": {"confirm_timeout_s": 5.5, "idle_timeout_s": 60}})
+        self.assertEqual(c.safety.confirm_timeout_s, 5.5)
+        self.assertEqual(c.safety.idle_timeout_s, 60)
+
     def test_invalid_hotkey_rejected(self):
         with self.assertRaises(ConfigError):
             from_dict({"safety": {"emergency_hotkey": "not+a+valid+key+name+"}})
@@ -81,6 +100,17 @@ class TestFromDict(unittest.TestCase):
             from_dict({"safety": {"rules": [{"match": {"tool": "x"}, "effect": "deny", "extra": 1}]}})
         with self.assertRaises(ConfigError):
             from_dict({"safety": {"rules": ["not-a-dict"]}})
+
+    def test_glob_rule_requires_string_value(self):
+        rules = [{
+            "match": {
+                "tool": "keyboard.type",
+                "argument": {"name": "text", "matcher": "glob", "value": ["secret*"]},
+            },
+            "effect": "deny",
+        }]
+        with self.assertRaises(ConfigError):
+            from_dict({"safety": {"rules": rules}})
 
     def test_idle_action_enum(self):
         with self.assertRaises(ConfigError):
@@ -157,6 +187,11 @@ class TestApplyOverrides(unittest.TestCase):
     def test_apply_overrides_validates(self):
         with self.assertRaises(ConfigError):
             apply_overrides(default_config(), {"capture": {"default_format": "bmp"}})
+
+    def test_apply_overrides_rejects_non_object_patch(self):
+        for patch in ([1], []):
+            with self.subTest(patch=patch), self.assertRaises(ConfigError):
+                apply_overrides(default_config(), patch)
 
 
 if __name__ == "__main__":

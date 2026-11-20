@@ -1,7 +1,9 @@
 """Unit tests for the action registry: validation, coercion, ranges and risk."""
 
 import unittest
+from unittest.mock import Mock
 
+from computer_control.engine import Engine
 from computer_control.actions import (
     ACTION_REGISTRY,
     ValidationError,
@@ -97,6 +99,15 @@ class TestValidation(unittest.TestCase):
         with self.assertRaises(ValidationError):
             clean_arguments("keyboard.combo", {"keys": []})
 
+    def test_combo_string_accepts_numpad_plus_key(self):
+        args = clean_arguments("keyboard.combo", {"keys": "ctrl+numpad_+"})
+        self.assertEqual(args["keys"], ["ctrl", "numpad_+"])
+
+    def test_combo_string_rejects_malformed_or_unknown_keys(self):
+        for keys in ("ctrl++q", "ctrl+notakey"):
+            with self.subTest(keys=keys), self.assertRaises(ValidationError):
+                clean_arguments("keyboard.combo", {"keys": keys})
+
     def test_key_names_validated(self):
         with self.assertRaises(ValidationError):
             clean_arguments("keyboard.press", {"key": "hyper"})
@@ -107,6 +118,21 @@ class TestValidation(unittest.TestCase):
         clean_arguments("keyboard.type", {"text": "x" * 10000})
         with self.assertRaises(ValidationError):
             clean_arguments("keyboard.type", {"text": "x" * 10001})
+
+    def test_batch_items_must_be_a_list(self):
+        with self.assertRaises(ValidationError) as ctx:
+            clean_arguments("batch.execute", {"items": 1})
+        self.assertTrue(any("items" in issue for issue in ctx.exception.issues))
+
+    def test_batch_tool_rejects_non_list_items_before_execution(self):
+        gate = Mock()
+        engine = Engine(Mock(), Mock(), gate, Mock(), lambda: None)
+
+        result = engine.run_tool("batch.execute", {"items": 1})
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "invalid_arguments")
+        gate.evaluate.assert_not_called()
 
     def test_batch_validation(self):
         items = [{"tool": "wait.pause", "arguments": {"ms": 1}}, {"tool": "screen.capture", "arguments": {}}]
@@ -120,6 +146,24 @@ class TestValidation(unittest.TestCase):
             clean_arguments("batch.execute", {"items": [{"tool": "keyboard.type", "arguments": {}}]})  # missing required
         with self.assertRaises(ValidationError):
             clean_arguments("batch.execute", {"items": [{"tool": 42, "arguments": {}}]})
+
+    def test_nested_batch_validation_is_bounded(self):
+        nested = {"tool": "wait.pause", "arguments": {"ms": 1}}
+        for _ in range(1200):
+            nested = {"tool": "batch.execute", "arguments": {"items": [nested]}}
+
+        with self.assertRaises(ValidationError):
+            clean_arguments("batch.execute", {"items": [nested]})
+
+    def test_shallow_nested_batch_validation(self):
+        nested = {
+            "tool": "batch.execute",
+            "arguments": {
+                "items": [{"tool": "wait.pause", "arguments": {"ms": 1}}],
+            },
+        }
+        args = clean_arguments("batch.execute", {"items": [nested]})
+        self.assertEqual(args["items"][0]["tool"], "batch.execute")
 
     def test_defaults_filled(self):
         args = clean_arguments("pointer.click", {})

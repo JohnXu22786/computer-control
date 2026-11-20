@@ -4,7 +4,7 @@
   "name": "computer-control",
   "title": "Computer Control",
   "description": "Desktop control plugin for the dsh harness: screen capture, pointer and keyboard injection, accessibility-tree driven semantic actions, with an emergency stop, allow/deny rules, confirmation flow and idle standby.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "plugin-contributors",
   "license": "MIT",
   "entry": {
@@ -30,7 +30,7 @@
   "tools": [
     {
       "name": "a11y.activate",
-      "summary": "Semantically activate an element from the latest snapshot (invoke/toggle/select pattern first; pixel click on its bounding box as fallback).",
+      "summary": "Semantically activate an element from the latest snapshot (auto tries invoke/toggle/select patterns before a pixel click; pattern uses UIA patterns only; pointer skips patterns).",
       "risk": "moderate",
       "availability": "platform dependent",
       "parameters": [
@@ -228,14 +228,14 @@
         {
           "name": "x",
           "type": "float",
-          "description": "Model-space x coordinate; omit to click at the current pointer position.",
+          "description": "Model-space x coordinate; provide together with y, or omit both to click at the current pointer position.",
           "required": false,
           "minimum": 0
         },
         {
           "name": "y",
           "type": "float",
-          "description": "Model-space y coordinate; omit to click at the current pointer position.",
+          "description": "Model-space y coordinate; provide together with x, or omit both to click at the current pointer position.",
           "required": false,
           "minimum": 0
         },
@@ -380,14 +380,14 @@
         {
           "name": "x",
           "type": "float",
-          "description": "Move here first (model space).",
+          "description": "Model-space x coordinate; provide together with y, or omit both to scroll at the current pointer position.",
           "required": false,
           "minimum": 0
         },
         {
           "name": "y",
           "type": "float",
-          "description": "Move here first (model space).",
+          "description": "Model-space y coordinate; provide together with x, or omit both to scroll at the current pointer position.",
           "required": false,
           "minimum": 0
         }
@@ -491,7 +491,7 @@
     },
     {
       "name": "batch.finished",
-      "summary": "A batch completed with the aggregated results."
+      "summary": "A batch completed with its per-item result envelopes."
     },
     {
       "name": "safety.confirmation_requested",
@@ -504,6 +504,10 @@
     {
       "name": "safety.confirmation_expired",
       "summary": "A pending confirmation timed out and was denied."
+    },
+    {
+      "name": "safety.grant_changed",
+      "summary": "The authorization profile changed (in-band narrowing or a host grant)."
     },
     {
       "name": "safety.panic_triggered",

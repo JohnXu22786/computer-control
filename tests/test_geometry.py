@@ -25,6 +25,19 @@ class TestRect(unittest.TestCase):
         self.assertEqual(small.clamp_point(5, 5), (10, 20))
         self.assertEqual(small.clamp_point(50, 50), (10, 20))
 
+    def test_clamp_point_fractional_origin_subunit_bounds(self):
+        r = Rect(10.8, 20.8, 0.2, 0.2)
+        self.assertEqual(r.clamp_point(10.9, 20.9), (10, 20))
+
+    def test_clamp_point_fractional_exclusive_edges(self):
+        r = Rect(1.8, 2.8, 0.1, 0.1)
+        self.assertEqual(r.clamp_point(10, 2.85), (1, 2))
+        self.assertEqual(r.clamp_point(1.85, 10), (1, 2))
+
+    def test_clamp_point_fractional_origin_with_integer_pixels(self):
+        r = Rect(10.5, 20.5, 0.8, 0.8)
+        self.assertEqual(r.clamp_point(10.6, 20.6), (11, 21))
+
     def test_from_bbox(self):
         r = Rect.from_bbox((10, 20, 110, 220))
         self.assertEqual(r.x, 10.0)

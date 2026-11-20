@@ -54,6 +54,7 @@ MOUSEEVENTF_MIDDLEDOWN = 0x0020
 MOUSEEVENTF_MIDDLEUP = 0x0040
 MOUSEEVENTF_WHEEL = 0x0800
 MOUSEEVENTF_HWHEEL = 0x1000
+MOUSEEVENTF_VIRTUALDESK = 0x4000
 MOUSEEVENTF_ABSOLUTE = 0x8000
 
 WHEEL_DELTA = 120
@@ -164,21 +165,22 @@ class WindowsDriver(BaseDriver):
         """Best-effort per-monitor DPI awareness so all Win32 geometry is in
         physical pixels. Called once, before any other Win32 call."""
         try:
-            self._user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
-            return "per-monitor-v2"
+            if self._user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+                return "per-monitor-v2"
         except Exception:
             pass
         try:
             shcore = ctypes.WinDLL("shcore.dll")
-            shcore.SetProcessDpiAwareness(2)
-            return "per-monitor"
+            if shcore.SetProcessDpiAwareness(2) >= 0:
+                return "per-monitor"
         except Exception:
             pass
         try:
-            self._user32.SetProcessDPIAware()
-            return "system"
+            if self._user32.SetProcessDPIAware():
+                return "system"
         except Exception:
             return "unaware"
+        return "unaware"
 
     def _read_virtual_screen(self):
         gsm = self._user32.GetSystemMetrics
@@ -214,11 +216,18 @@ class WindowsDriver(BaseDriver):
         return "pillow"
 
     def _probe_uia(self) -> bool:
+        bridge = None
         try:
             bridge = self._uia_bridge()
             return bridge.available
         except Exception:
             return False
+        finally:
+            if bridge is not None:
+                try:
+                    bridge.close()
+                except Exception:
+                    pass
 
     def _uia_bridge(self):
         from computer_control.a11y.windows_uia import UiaBridge
@@ -230,17 +239,31 @@ class WindowsDriver(BaseDriver):
 
     def close(self):
         with self._uia_lock:
-            if self._uia is not None:
-                try:
-                    self._uia.close()
-                except Exception:
-                    pass
-                self._uia = None
+            bridge = self._uia
+        if bridge is not None:
+            try:
+                bridge.close()
+            except Exception:
+                pass
+
+    def close_worker(self):
+        with self._uia_lock:
+            bridge = self._uia
+        if bridge is not None:
+            try:
+                bridge.close()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------- capture
 
     def capture(self, bbox: tuple, canvas_width: int, format: str = "png",
                 quality: int = 85, grayscale: bool = False) -> CapturePayload:
+        return self.capture_with_dimensions(bbox, canvas_width, None, format, quality, grayscale)
+
+    def capture_with_dimensions(self, bbox: tuple, canvas_width: int,
+                                canvas_height: Optional[int], format: str = "png",
+                                quality: int = 85, grayscale: bool = False) -> CapturePayload:
         left, top, right, bottom = bbox
         width = max(1, int(right - left))
         height = max(1, int(bottom - top))
@@ -251,7 +274,7 @@ class WindowsDriver(BaseDriver):
                 image = ImageGrab.grab(bbox=(left, top, right, bottom), all_screens=True)
         except Exception as exc:
             raise DriverError("capture failed: %s" % exc, code="driver_failed")
-        return self._encode(image, canvas_width, format, quality, grayscale)
+        return self._encode(image, canvas_width, canvas_height, format, quality, grayscale)
 
     def _capture_mss(self, left, top, width, height) -> Image.Image:
         import mss
@@ -260,16 +283,17 @@ class WindowsDriver(BaseDriver):
             shot = sct.grab({"left": left, "top": top, "width": width, "height": height})
         return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
 
-    def _encode(self, image: Image.Image, canvas_width: int, format: str,
+    def _encode(self, image: Image.Image, canvas_width: int, canvas_height: Optional[int], format: str,
                 quality: int, grayscale: bool) -> CapturePayload:
         if image.mode != "RGB":
             image = image.convert("RGB")
         if grayscale:
             image = image.convert("L")
-        if image.width != canvas_width:
-            new_height = max(1, int(round(image.height * canvas_width / image.width)))
+        target_height = (max(1, int(round(image.height * canvas_width / image.width)))
+                         if canvas_height is None else canvas_height)
+        if image.size != (canvas_width, target_height):
             resampling = getattr(Image, "Resampling", Image).LANCZOS
-            image = image.resize((canvas_width, new_height), resampling)
+            image = image.resize((canvas_width, target_height), resampling)
         buffer = io.BytesIO()
         if format == "jpeg":
             image.save(buffer, "JPEG", quality=quality)
@@ -300,6 +324,7 @@ class WindowsDriver(BaseDriver):
         if flags & MOUSEEVENTF_ABSOLUTE:
             norm_x = int(round((dx - vx) * 65535 / max(vw - 1, 1)))
             norm_y = int(round((dy - vy) * 65535 / max(vh - 1, 1)))
+            flags |= MOUSEEVENTF_VIRTUALDESK
         else:
             norm_x, norm_y = int(dx), int(dy)
         inp = _INPUT()
@@ -307,15 +332,34 @@ class WindowsDriver(BaseDriver):
         inp.mi = _MOUSEINPUT(norm_x, norm_y, data & 0xFFFFFFFF, flags, 0, 0)
         self._send_input(inp)
 
+    @staticmethod
+    def _release_with_retry(release) -> None:
+        """Retry a failed release once while preserving its first error."""
+        try:
+            release()
+        except Exception as exc:
+            try:
+                release()
+            except Exception:
+                pass
+            raise exc
+
     def pointer_click(self, button: str, times: int = 1, hold_ms: int = 0) -> None:
         down, up = _BUTTON_FLAGS.get(button, _BUTTON_FLAGS["left"])
         for i in range(max(1, int(times))):
             self._send_mouse(down)
-            if hold_ms > 0:
-                time.sleep(hold_ms / 1000.0)
-            else:
-                time.sleep(0.01)
-            self._send_mouse(up)
+            try:
+                if hold_ms > 0:
+                    time.sleep(hold_ms / 1000.0)
+                else:
+                    time.sleep(0.01)
+            except Exception:
+                try:
+                    self._release_with_retry(lambda: self._send_mouse(up))
+                except Exception:
+                    pass
+                raise
+            self._release_with_retry(lambda: self._send_mouse(up))
             if i + 1 < max(1, int(times)):
                 time.sleep(0.06)
 
@@ -325,11 +369,18 @@ class WindowsDriver(BaseDriver):
         self.pointer_move(fx, fy, steps=4)
         time.sleep(0.02)
         self._send_mouse(down)
-        time.sleep(0.02)
-        self.pointer_move(tx, ty, steps=max(1, int(steps)))
-        if hold_ms > 0:
-            time.sleep(hold_ms / 1000.0)
-        self._send_mouse(up)
+        try:
+            time.sleep(0.02)
+            self.pointer_move(tx, ty, steps=max(1, int(steps)))
+            if hold_ms > 0:
+                time.sleep(hold_ms / 1000.0)
+        except Exception:
+            try:
+                self._release_with_retry(lambda: self._send_mouse(up))
+            except Exception:
+                pass
+            raise
+        self._release_with_retry(lambda: self._send_mouse(up))
 
     def pointer_scroll(self, axis: str, amount: float) -> None:
         delta = int(round(amount * WHEEL_DELTA))
@@ -382,8 +433,15 @@ class WindowsDriver(BaseDriver):
     def key_press(self, key_name: str) -> None:
         vk, extended = parse_key_full(key_name)
         self._key_down(vk, extended)
-        time.sleep(0.02)
-        self._key_up(vk, extended)
+        try:
+            time.sleep(0.02)
+        except Exception:
+            try:
+                self._release_with_retry(lambda: self._key_up(vk, extended))
+            except Exception:
+                pass
+            raise
+        self._release_with_retry(lambda: self._key_up(vk, extended))
 
     def key_combo(self, key_names: List[str]) -> None:
         """Press every key down in order, release in reverse. If any key
@@ -403,9 +461,30 @@ class WindowsDriver(BaseDriver):
                 except Exception:
                     pass
             raise
-        for vk, extended in reversed(resolved):
-            self._key_up(vk, extended)
-            time.sleep(0.015)
+        release_error = None
+        failed_releases = []
+        for vk, extended in reversed(pressed):
+            try:
+                self._key_up(vk, extended)
+            except Exception as exc:
+                if release_error is None:
+                    release_error = exc
+                failed_releases.append((vk, extended))
+            else:
+                time.sleep(0.015)
+
+        # A failed SendInput may leave that key down, so retry failed releases
+        # once after attempting the rest of the chord.
+        for vk, extended in failed_releases:
+            try:
+                self._key_up(vk, extended)
+            except Exception:
+                pass
+            else:
+                time.sleep(0.015)
+
+        if release_error is not None:
+            raise release_error
 
     def key_type(self, text: str, interval_ms: int = 0) -> None:
         interval = max(0, int(interval_ms)) / 1000.0

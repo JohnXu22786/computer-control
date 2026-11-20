@@ -20,19 +20,22 @@ class StopIndicator:
     def __init__(self, hotkey: str = ""):
         self._queue: "queue.Queue[str]" = queue.Queue()
         self._thread = None
-        self._ok = False
+        self._command_lock = threading.Lock()
+        self._accepting_commands = False
         self._hotkey = hotkey or ""
         try:
             import importlib.util
 
             if importlib.util.find_spec("tkinter") is None:
-                self._ok = False
                 return
             thread = threading.Thread(target=self._run, name="stop-indicator", daemon=True)
             self._thread = thread
+            with self._command_lock:
+                self._accepting_commands = True
             thread.start()
         except Exception:
-            self._ok = False
+            with self._command_lock:
+                self._accepting_commands = False
 
     def _run(self) -> None:
         try:
@@ -40,9 +43,9 @@ class StopIndicator:
 
             root = tk.Tk()
         except Exception:
-            self._ok = False
+            with self._command_lock:
+                self._accepting_commands = False
             return
-        self._ok = True
         root.overrideredirect(True)
         root.attributes("-topmost", True)
         try:
@@ -66,6 +69,12 @@ class StopIndicator:
                     self._place()
                 elif message == "hide":
                     self._root.withdraw()
+                elif message == "close":
+                    try:
+                        self._root.destroy()
+                    except Exception:
+                        pass
+                    return
         except queue.Empty:
             pass
         if self._root is not None:
@@ -86,19 +95,20 @@ class StopIndicator:
         root.lift()
 
     def show(self) -> None:
-        if not self._ok:
-            return
-        self._queue.put("show")
+        with self._command_lock:
+            if not self._accepting_commands or self._thread is None or not self._thread.is_alive():
+                return
+            self._queue.put("show")
 
     def hide(self) -> None:
-        if not self._ok:
-            return
-        self._queue.put("hide")
+        with self._command_lock:
+            if not self._accepting_commands or self._thread is None or not self._thread.is_alive():
+                return
+            self._queue.put("hide")
 
     def close(self) -> None:
-        if not self._ok:
-            return
-        try:
-            self._root.destroy()
-        except Exception:
-            pass
+        with self._command_lock:
+            if not self._accepting_commands or self._thread is None or not self._thread.is_alive():
+                return
+            self._accepting_commands = False
+            self._queue.put("close")
